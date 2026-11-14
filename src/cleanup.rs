@@ -23,8 +23,10 @@ pub fn remember(sb: &Sandbox) {
     LIVE.lock().unwrap().push(Entry { root: sb.root.clone(), keep: sb.keep, kill });
 }
 
-pub fn forget_all() {
-    LIVE.lock().unwrap().clear();
+/// Forget one sandbox (its probe tore it down). Other probes' sandboxes, such
+/// as a `compare` run's next to the session's own, stay remembered.
+pub fn forget(root: &std::path::Path) {
+    LIVE.lock().unwrap().retain(|e| e.root != root);
 }
 
 fn run_all() {

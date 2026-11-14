@@ -30,6 +30,9 @@ pub struct SandboxOpts {
     pub config_toml: Option<String>,
     pub extra_env: BTreeMap<String, String>,
     pub keep: bool,
+    /// Use this root instead of a fresh random one. `compare` gives both of
+    /// its runs the same root, one after the other, so paths on screen match.
+    pub root: Option<PathBuf>,
 }
 
 pub struct Sandbox {
@@ -61,7 +64,17 @@ const LOGGED: &[&str] = &["afplay", "pw-play", "paplay", "notify-send", "osascri
 
 impl Sandbox {
     pub fn create(trix: &Path, probe: &Path, opts: &SandboxOpts) -> Result<Sandbox> {
-        let root = unique_root()?;
+        let root = match &opts.root {
+            Some(r) => {
+                // Left over from a run of ours that didn't finish tearing down.
+                if r.exists() && std::fs::read_to_string(r.join("owner.pid")).is_ok_and(|p| p.trim() == std::process::id().to_string()) {
+                    let _ = std::fs::remove_dir_all(r);
+                }
+                std::fs::create_dir(r).with_context(|| format!("creating the sandbox {}", r.display()))?;
+                r.clone()
+            }
+            None => unique_root()?,
+        };
         let real_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
         let home = match opts.agents {
             AgentMode::Fake => root.join("home"),
@@ -298,6 +311,14 @@ pub fn sweep_stale() {
 pub fn alive(pid: i32) -> bool {
     let ok = unsafe { libc::kill(pid, 0) == 0 };
     ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// A sandbox path no one is using, reserved and then released, for
+/// `SandboxOpts::root`.
+pub fn fresh_root() -> Result<PathBuf> {
+    let r = unique_root()?;
+    std::fs::remove_dir(&r)?;
+    Ok(r)
 }
 
 fn unique_root() -> Result<PathBuf> {

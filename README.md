@@ -6,7 +6,7 @@ trix-probe runs trix in a virtual terminal inside a throwaway sandbox. It turns 
 
 It works two ways:
 
-- **As an MCP server.** Claude Code (or any MCP client) gets 22 tools (`launch`, `press`, `type_text`, `click`, `resize`, `fake_agent`, `report_issue`, …) and you steer the testing yourself.
+- **As an MCP server.** Claude Code (or any MCP client) gets 24 tools (`launch`, `press`, `type_text`, `click`, `resize`, `sweep`, `compare`, `fake_agent`, `report_issue`, …) and you steer the testing yourself.
 - **On its own.** `trix-probe explore` hands the tools to Claude through the API. Claude explores trix, checks it against the docs and writes a report. Each issue comes with a screenshot and a replayable repro.
 
 ```
@@ -43,6 +43,32 @@ Then ask, for example:
 > With trix-probe, open three fake claude agents, make the one I'm not looking at ask for permission, and check the needs-you strip, alt+a, the notification and the sound. Then do it again while the window is unfocused.
 
 Each call returns the screen. Every action is logged, so `report_issue` saves the steps that led to the bug.
+
+### Testing a branch
+
+`launch` takes `trix`, the binary to run in that session, so one MCP server can test any build. The result names the binary and its version, and reports and repros record it:
+
+> Build my trix branch, then with trix-probe launch `~/Projects/trix/target/release/trix` and check every dialog at 80x24, 80x8 and 80x6.
+
+`sweep` looks at each case at each size in one call: it resizes, presses the case's keys, looks, and presses esc. It returns every screen, and a contact sheet per case:
+
+```json
+{"sizes": ["80x24", "80x8", "80x6"],
+ "cases": [{"name": "broadcast", "keys": ["alt+b"]}, {"name": "keys", "keys": ["alt+?"]}]}
+```
+
+`resize_while_open: true` opens each case once and resizes it through the sizes instead.
+
+`compare` runs the same steps on two binaries, one after the other in matching sandboxes, and shows the lines that differ, step by step and, inside a sweep, screen by screen. It masks the clock, durations, spinners, sparklines and the fake agents' ids, so only real differences show. Before/after images of each differing screen are saved. With no `steps`, it replays what your session has done since its launch:
+
+> Compare the Homebrew trix with my build on what we just did.
+
+```
+── step 2/6 sweep …
+  screen · broadcast @ 80x6: 4 of 7 lines differ
+    1 before│    │                                                                      │1 ╮
+    1  after│    │  › message to send…                                                  │1 ╮
+```
 
 ## On its own
 
@@ -85,7 +111,13 @@ Replay a repro to confirm a bug, or to check a fix:
 trix-probe replay ~/.local/share/trix-probe/runs/…/issues/001-…/repro.json --trix ./target/release/trix
 ```
 
-It prints each step and the final screen, and saves a PNG of it.
+It prints each step and the final screen, and saves a PNG of it. The binary you give wins over one a recorded `launch` names. `--recorded-trix` runs the recorded ones instead.
+
+The same comparison from the command line, on a repro or any file of that shape:
+
+```sh
+trix-probe compare --before "$(which trix)" --after ./target/release/trix steps.json
+```
 
 For a quick look by hand:
 
@@ -142,9 +174,10 @@ cargo test        # unit tests, plus an end-to-end needs-you round trip against 
 ```
 
 ```
-src/main.rs     CLI: mcp, explore, replay, try, doctor (+ the internal fake-agent and log-cmd)
+src/main.rs     CLI: mcp, explore, replay, compare, try, doctor (+ the internal fake-agent and log-cmd)
 src/probe.rs    a testing session: sandbox, terminals, actions, observations, issues and reports
 src/tools.rs    the tool schemas and dispatch, shared by MCP and explore
+src/compare.rs  the same steps on two binaries, masked and diffed
 src/mcp.rs      MCP over stdio (JSON-RPC 2.0)
 src/explore.rs  the autonomous runner (Claude Messages API over HTTP)
 src/term.rs     PTY + alacritty_terminal, snapshots, the outer terminal's palette

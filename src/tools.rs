@@ -32,6 +32,7 @@ pub fn definitions() -> Vec<Value> {
                 "config_toml": {"type": "string", "description": "Contents for ~/.config/trix/config.toml (optional). A [notify] block that logs notifications is added unless you write your own."},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Extra environment variables for trix, e.g. {\"TRIX_THEME\": \"…\"}."},
                 "cwd": {"type": "string", "description": "Folder to start trix in, relative to the sandbox (default work/demo)."},
+                "trix": {"type": "string", "description": "The trix binary to test in this session, e.g. ~/Projects/trix/target/release/trix for a branch you just built (default: the one trix-probe was started with). The result names the binary and its version; reports and repros record it."},
                 "screenshot": shot(),
             }},
         }),
@@ -98,6 +99,36 @@ pub fn definitions() -> Vec<Value> {
                 "cols": {"type": "integer"}, "rows": {"type": "integer"},
                 "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
             }, "required": ["cols", "rows"]},
+        }),
+        json!({
+            "name": "sweep",
+            "description": "Look at each case at each size, in this session, in one call: for every case and size it resizes, presses the case's keys (and types its text), looks, then presses reset (default esc) to close it again. Returns every screen as text (or contact-sheet PNGs, one per case) and saves the sheets. Use it for layout at many sizes, e.g. every dialog from 24 rows down to 5. Inside compare, each of its screens is compared on its own.",
+            "input_schema": {"type": "object", "properties": {
+                "sizes": {"type": "array", "items": {"type": "string"}, "description": "Sizes as COLSxROWS, e.g. [\"80x24\", \"80x9\", \"80x6\", \"50x12\"]."},
+                "cases": {"type": "array", "description": "What to open at each size. Leave out to look at the screen as it is.", "items": {"type": "object", "properties": {
+                    "name": {"type": "string", "description": "A label, e.g. \"broadcast\" (default: the keys)."},
+                    "keys": {"type": "array", "items": {"type": "string"}, "description": "Keys that open it, as press takes them, e.g. [\"alt+b\"]."},
+                    "text": {"type": "string", "description": "Text to type after the keys, e.g. a message to see it in place."},
+                    "reset": {"type": "array", "items": {"type": "string"}, "description": "Keys that close it again (default [\"esc\"]; [] for none)."},
+                }}},
+                "resize_while_open": {"type": "boolean", "description": "Open each case once at the first size, then resize it through the rest (default false: open it fresh at each size). Resizing an open dialog finds different bugs."},
+                "wait_ms": {"type": "integer", "description": "How long each screen may take to settle (default 800; it moves on once the screen is still for 250 ms)."},
+                "terminal": term(), "screenshot": shot(),
+            }, "required": ["sizes"]},
+        }),
+        json!({
+            "name": "compare",
+            "description": "Run the same steps on two trix binaries, one after the other in matching fresh sandboxes, and show where their screens and observations differ: before/after a fix, a branch against main. Steps are tool calls ({\"tool\": \"press\", \"args\": {…}}) starting with launch; leave them out to replay what this session has done since its launch. Clock, durations, spinners, sparklines and fake-agent ids are masked so only real differences show. Your own session is left as it is. Before/after images of each differing screen are saved.",
+            "input_schema": {"type": "object", "properties": {
+                "after": {"type": "string", "description": "The trix binary to set against before, e.g. ~/Projects/trix/target/release/trix."},
+                "before": {"type": "string", "description": "The baseline trix binary (default: the one trix-probe was started with)."},
+                "steps": {"type": "array", "items": {"type": "object"}, "description": "The tool calls to run on both, starting with launch, e.g. [{\"tool\": \"launch\", \"args\": {\"args\": [\"claude\", \"shell\"], \"cols\": 80, \"rows\": 24}}, {\"tool\": \"sweep\", \"args\": {\"sizes\": [\"80x9\", \"80x6\"], \"cases\": [{\"keys\": [\"alt+b\"]}]}}]."},
+                "repro": {"type": "string", "description": "A repro.json (from report_issue) to run instead of steps."},
+                "ignore": {"type": "array", "items": {"type": "string"}, "description": "More regexes to mask on both sides before comparing."},
+                "raw": {"type": "boolean", "description": "Compare without the default masks."},
+                "show": {"type": "string", "enum": ["diff", "all"], "description": "diff (default): only the lines that differ; all: also both whole screens of each that differs."},
+                "screenshot": {"type": "string", "enum": ["text", "png", "both"], "description": "png or both: also return before/after images of the first 4 screens that differ."},
+            }, "required": ["after"]},
         }),
         json!({
             "name": "set_focus",
@@ -205,7 +236,8 @@ pub fn definitions() -> Vec<Value> {
 
 /// Tools whose calls are part of a repro script.
 fn is_action(name: &str) -> bool {
-    !matches!(name, "screen" | "find_text" | "observations" | "report_issue" | "read_file" | "teardown")
+    // compare runs its own sandboxes and leaves this session alone.
+    !matches!(name, "screen" | "find_text" | "observations" | "report_issue" | "read_file" | "teardown" | "compare")
 }
 
 pub fn call(p: &mut Probe, name: &str, args: &Value) -> ToolOut {
@@ -219,6 +251,8 @@ pub fn call(p: &mut Probe, name: &str, args: &Value) -> ToolOut {
         "drag" => p.drag(&args),
         "scroll" => p.scroll(&args),
         "resize" => p.resize(&args),
+        "sweep" => p.sweep(&args),
+        "compare" => crate::compare::compare(p, &args),
         "set_focus" => p.set_focus(&args),
         "wait_for" => p.wait_for(&args),
         "sleep" => p.sleep(&args),

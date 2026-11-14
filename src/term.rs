@@ -394,6 +394,7 @@ pub struct Cell {
     pub spacer: bool,
 }
 
+#[derive(Clone)]
 pub struct Snapshot {
     pub cols: usize,
     pub rows: usize,

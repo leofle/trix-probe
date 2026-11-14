@@ -2,6 +2,7 @@
 //! UX problems. See README.md.
 
 mod cleanup;
+mod compare;
 mod explore;
 mod fake;
 mod keys;
@@ -80,6 +81,25 @@ enum Cmd {
         #[arg(long)]
         recorded_trix: bool,
     },
+    /// Run the same steps on two trix binaries and show where their screens differ.
+    Compare {
+        /// A repro.json, or a file of the same shape: {"actions": [{"tool": "launch", "args": {…}}, …]}.
+        steps: PathBuf,
+        /// The baseline trix (default: --trix, $TRIX_PROBE_TRIX, then `trix` on PATH).
+        #[arg(long)]
+        before: Option<PathBuf>,
+        /// The trix to set against it.
+        #[arg(long)]
+        after: PathBuf,
+        /// A regex to mask on both sides before comparing; repeat for several.
+        #[arg(long)]
+        ignore: Vec<String>,
+        /// Also print both whole screens of each that differs.
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Launch trix, press some keys, print the screen and save a PNG: a quick look by hand.
     Try {
         #[command(flatten)]
@@ -139,6 +159,7 @@ fn main() {
             explore::run(p, explore::ExploreOpts { model, effort, focus, max_steps, max_usd, docs, fallbacks: !no_fallbacks })
         }),
         Cmd::Replay { repro, common, recorded_trix } => replay(repro, common, recorded_trix),
+        Cmd::Compare { steps, before, after, ignore, all, common } => compare_cmd(steps, before, after, ignore, all, common),
         Cmd::Try { common, keys, text, cols, rows, colors, wait, png, args } => try_it(common, keys, text, (cols, rows), colors, wait, png, args),
         Cmd::Doctor(c) => doctor(c),
     };
@@ -213,6 +234,10 @@ fn replay(repro: PathBuf, mut common: Common, recorded: bool) -> Result<()> {
         common.trix = Some(PathBuf::from(t));
     }
     let mut p = setup(&common, "replay")?;
+    if !recorded {
+        // The binary given here wins over any a recorded launch names.
+        p.trix_override = Some(p.cfg.trix.clone());
+    }
     let actions = v.get("actions").and_then(Value::as_array).cloned().unwrap_or_default();
     anyhow::ensure!(!actions.is_empty(), "no actions in {}", repro.display());
     for (i, a) in actions.iter().enumerate() {
@@ -257,6 +282,27 @@ fn try_it(common: Common, keys: Vec<String>, text: Option<String>, (cols, rows):
     std::fs::write(&png, render::png(&snap, common.font_px)?)?;
     println!("saved {}", png.display());
     p.teardown();
+    Ok(())
+}
+
+fn compare_cmd(steps: PathBuf, before: Option<PathBuf>, after: PathBuf, ignore: Vec<String>, all: bool, mut common: Common) -> Result<()> {
+    if before.is_some() {
+        common.trix = before;
+    }
+    let mut p = setup(&common, "compare")?;
+    let args = json!({
+        "repro": steps.display().to_string(),
+        "before": p.cfg.trix.display().to_string(),
+        "after": after.display().to_string(),
+        "ignore": ignore,
+        "show": if all { "all" } else { "diff" },
+    });
+    let out = tools::call(&mut p, "compare", &args);
+    println!("{}", out.text.trim_end());
+    if !out.is_error {
+        println!("saved in {}", compare::out_dir(&p).display());
+    }
+    anyhow::ensure!(!out.is_error, "compare failed");
     Ok(())
 }
 

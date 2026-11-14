@@ -196,7 +196,18 @@ fn read_hooks(path: &Path) -> HashMap<String, Vec<String>> {
 
 fn new_uuid() -> String {
     let mut b = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+    if std::env::var_os("TRIX_PROBE_SEEDED").is_some() {
+        // `compare`: the same agent gets the same id in both runs, so its
+        // screen matches. trix numbers agents the same way each time.
+        let seed = format!("{}/{}", std::env::var("TRIX_AGENT_ID").unwrap_or_default(), std::env::var("TRIX_AGENT_NAME").unwrap_or_default());
+        let mut h: u64 = 0xcbf29ce484222325;
+        for (i, x) in b.iter_mut().enumerate() {
+            for byte in seed.bytes().chain([i as u8]) {
+                h = (h ^ byte as u64).wrapping_mul(0x100000001b3);
+            }
+            *x = (h >> 24) as u8;
+        }
+    } else if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         let _ = f.read_exact(&mut b);
     }
     b[6] = (b[6] & 0x0f) | 0x40;

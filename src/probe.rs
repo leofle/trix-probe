@@ -15,8 +15,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// One thing `sweep` opens at every size.
+struct SweepCase {
+    name: String,
+    keys: Vec<String>,
+    text: Option<String>,
+    /// Pressed afterwards to get back (default esc).
+    reset: Vec<String>,
+}
+
+#[derive(Clone)]
 pub struct ProbeConfig {
-    /// The trix binary under test.
+    /// The trix binary to test unless `launch` names another.
     pub trix: PathBuf,
     /// This program, for the shims in the sandbox.
     pub exe: PathBuf,
@@ -52,6 +62,9 @@ pub struct ToolOut {
     pub text: String,
     pub images: Vec<Vec<u8>>,
     pub is_error: bool,
+    /// Screens a tool looked at along the way, labeled (`sweep`'s), for
+    /// `compare` to set side by side. Empty: only the screen at the end counts.
+    pub frames: Vec<(String, Snapshot)>,
 }
 
 impl ToolOut {
@@ -113,6 +126,16 @@ impl Drop for EventsFollower {
 
 pub struct Probe {
     pub cfg: ProbeConfig,
+    /// The trix this session runs: `launch`'s `trix`, else `cfg.trix`.
+    pub trix: PathBuf,
+    /// When set, every launch runs this trix whatever its `trix` says
+    /// (`compare` and `replay --trix` pin the binary this way).
+    pub trix_override: Option<PathBuf>,
+    /// When set, every launch builds its sandbox at this path (see `SandboxOpts::root`),
+    /// and fake agents take ids that are the same from run to run.
+    pub fixed_root: Option<PathBuf>,
+    /// Numbers the folders `sweep` and `compare` write into.
+    pub runs: u32,
     pub sb: Option<Sandbox>,
     terms: BTreeMap<String, Terminal>,
     events: Option<EventsFollower>,
@@ -130,7 +153,11 @@ pub struct Probe {
 impl Probe {
     pub fn new(cfg: ProbeConfig) -> Probe {
         Probe {
+            trix: cfg.trix.clone(),
             cfg,
+            trix_override: None,
+            fixed_root: None,
+            runs: 0,
             sb: None,
             terms: BTreeMap::new(),
             events: None,
@@ -166,16 +193,23 @@ impl Probe {
         self.terms.clear();
         if let Some(sb) = self.sb.take() {
             sb.teardown();
+            crate::cleanup::forget(&sb.root);
         }
-        crate::cleanup::forget_all();
     }
 
     // ---- launching ---------------------------------------------------
 
     pub fn launch(&mut self, a: &Value) -> Result<ToolOut> {
+        // Before the teardown, so a mistyped path leaves the session running.
+        let trix = match (&self.trix_override, a.get("trix").and_then(Value::as_str).filter(|s| !s.trim().is_empty())) {
+            (Some(t), _) => t.clone(),
+            (None, Some(t)) => resolve_trix(t)?,
+            (None, None) => self.cfg.trix.clone(),
+        };
         self.teardown();
         self.actions.clear();
         self.offsets.clear();
+        self.trix = trix;
         let agents = match a.get("agents").and_then(Value::as_str) {
             Some("real") => AgentMode::Real,
             _ => AgentMode::Fake,
@@ -186,13 +220,17 @@ impl Probe {
                 extra_env.insert(k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
             }
         }
+        if self.fixed_root.is_some() {
+            extra_env.insert("TRIX_PROBE_SEEDED".into(), "1".into());
+        }
         let opts = SandboxOpts {
             agents,
             config_toml: a.get("config_toml").and_then(Value::as_str).map(str::to_string),
             extra_env,
             keep: self.cfg.keep_sandboxes,
+            root: self.fixed_root.clone(),
         };
-        let sb = Sandbox::create(&self.cfg.trix, &self.cfg.exe, &opts)?;
+        let sb = Sandbox::create(&self.trix, &self.cfg.exe, &opts)?;
         crate::cleanup::remember(&sb);
         self.palette = Palette::by_name(a.get("terminal_colors").and_then(Value::as_str).unwrap_or("dark"));
         self.keyboard = if a.get("keyboard").and_then(Value::as_str) == Some("kitty") { Keyboard::Kitty } else { Keyboard::Legacy };
@@ -205,9 +243,10 @@ impl Probe {
             None => sb.demo_repo(),
         };
         let summary = format!(
-            "sandbox {} · trix {} · {} agents · {}x{} · {} terminal colors · {} keyboard\nagents start in {} (a git repo with an uncommitted change); {} is also there.\n",
+            "sandbox {} · trix {} ({}) · {} agents · {}x{} · {} terminal colors · {} keyboard\nagents start in {} (a git repo with an uncommitted change); {} is also there.\n",
             sb.root.display(),
-            self.cfg.trix.display(),
+            self.trix.display(),
+            self.trix_version(),
             if agents == AgentMode::Fake { "fake" } else { "REAL" },
             cols,
             rows,
@@ -479,6 +518,144 @@ impl Probe {
         }
         let list: Vec<String> = hits.iter().map(|(r, c)| format!("row {r} col {c}: {}", snap.row_text(*r).trim())).collect();
         Ok(ToolOut::text(format!("{} match(es):\n{}", hits.len(), list.join("\n"))))
+    }
+
+    // ---- sweeping ----------------------------------------------------
+
+    fn press_keys(&self, name: Option<&str>, list: &[String]) -> Result<()> {
+        let t = self.term(name)?;
+        for (i, k) in list.iter().enumerate() {
+            t.write(&keys::encode(k, t.mode(), t.keyboard)?);
+            if i + 1 < list.len() {
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        }
+        Ok(())
+    }
+
+    fn open_case(&self, name: Option<&str>, case: &SweepCase, wait: Duration) -> Result<()> {
+        self.press_keys(name, &case.keys)?;
+        let t = self.term(name)?;
+        if let Some(text) = &case.text {
+            for ch in text.chars() {
+                t.write(&keys::text(&ch.to_string(), false, t.mode()));
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        }
+        t.settle(Duration::from_millis(250), wait);
+        Ok(())
+    }
+
+    fn close_case(&self, name: Option<&str>, case: &SweepCase, wait: Duration) -> Result<()> {
+        if !case.reset.is_empty() {
+            self.press_keys(name, &case.reset)?;
+            self.term(name)?.settle(Duration::from_millis(250), wait);
+        }
+        Ok(())
+    }
+
+    /// Every case at every size, in this session: resize, open the case,
+    /// look, close it again. One call instead of a loop of resize, press and
+    /// screen, and much faster than a fresh launch per screen.
+    pub fn sweep(&mut self, a: &Value) -> Result<ToolOut> {
+        let name = a.get("terminal").and_then(Value::as_str).map(str::to_string);
+        let name = name.as_deref();
+        let sizes: Vec<(u16, u16)> = a
+            .get("sizes")
+            .and_then(Value::as_array)
+            .context("sizes is required, e.g. [\"80x24\", \"80x8\", \"60x6\"]")?
+            .iter()
+            .map(parse_size)
+            .collect::<Result<_>>()?;
+        anyhow::ensure!(!sizes.is_empty(), "sizes is empty: give at least one, e.g. [\"80x24\"]");
+        let mut cases = Vec::new();
+        for (i, c) in a.get("cases").and_then(Value::as_array).cloned().unwrap_or_default().iter().enumerate() {
+            let keys = str_list(c.get("keys"));
+            let text = c.get("text").and_then(Value::as_str).map(str::to_string);
+            let reset = match c.get("reset") {
+                Some(r) => str_list(Some(r)),
+                None if keys.is_empty() && text.is_none() => Vec::new(),
+                None => vec!["esc".to_string()],
+            };
+            let label = c.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| if keys.is_empty() { format!("case {}", i + 1) } else { keys.join(" ") });
+            cases.push(SweepCase { name: label, keys, text, reset });
+        }
+        if cases.is_empty() {
+            cases.push(SweepCase { name: "screen".into(), keys: Vec::new(), text: None, reset: Vec::new() });
+        }
+        let open_once = a.get("resize_while_open").and_then(Value::as_bool).unwrap_or(false);
+        let wait = Duration::from_millis(a.get("wait_ms").and_then(Value::as_u64).unwrap_or(800));
+        let shot = Shot::parse(a.get("screenshot"), Shot::Text);
+        let start_size = self.term(name)?.size();
+
+        let mut groups: Vec<Vec<(String, Snapshot)>> = Vec::new();
+        for case in &cases {
+            let mut tiles = Vec::new();
+            if open_once {
+                let (c, r) = sizes[0];
+                self.term(name)?.resize(c, r);
+                self.term(name)?.settle(Duration::from_millis(250), wait);
+                self.open_case(name, case, wait)?;
+            }
+            for &(c, r) in &sizes {
+                let t = self.term(name)?;
+                t.resize(c, r);
+                t.settle(Duration::from_millis(250), wait);
+                if !open_once {
+                    self.open_case(name, case, wait)?;
+                }
+                tiles.push((format!("{} @ {c}x{r}", case.name), self.term(name)?.snapshot()));
+                if !open_once {
+                    self.close_case(name, case, wait)?;
+                }
+            }
+            if open_once {
+                self.close_case(name, case, wait)?;
+            }
+            groups.push(tiles);
+        }
+        let t = self.term(name)?;
+        t.resize(start_size.0, start_size.1);
+        t.settle(Duration::from_millis(250), wait);
+
+        // A contact sheet per case, on disk and, when asked, in the result.
+        self.runs += 1;
+        let dir = self.cfg.out.join("sweeps").join(format!("{:03}", self.runs));
+        std::fs::create_dir_all(&dir)?;
+        let mut out = ToolOut::default();
+        let mut saved = 0;
+        for (i, (case, tiles)) in cases.iter().zip(&groups).enumerate() {
+            let refs: Vec<(&str, &Snapshot)> = tiles.iter().map(|(l, s)| (l.as_str(), s)).collect();
+            if let Ok(png) = crate::render::sheet(&refs, self.cfg.font_px) {
+                let slug: String = case.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+                std::fs::write(dir.join(format!("{:02}-{}.png", i + 1, slug.trim_matches('-'))), &png)?;
+                saved += 1;
+                if matches!(shot, Shot::Png | Shot::Both) {
+                    out.images.push(png);
+                }
+            }
+        }
+        let n: usize = groups.iter().map(Vec::len).sum();
+        let mut text = format!(
+            "swept {} case(s) × {} size(s) = {n} screens{}; back at {}x{}. Contact sheets ({saved}) in {}\n",
+            cases.len(),
+            sizes.len(),
+            if open_once { ", opening each case once and resizing it through every size" } else { "" },
+            start_size.0,
+            start_size.1,
+            dir.display()
+        );
+        for (label, snap) in groups.iter().flatten() {
+            match shot {
+                Shot::Text | Shot::Both => text += &format!("\n── {label}\n{}", snap.to_text()),
+                Shot::Png => text += &format!("── {label}: in the images\n"),
+                Shot::None => {}
+            }
+        }
+        text += &self.changes();
+        out.text = text;
+        out.frames = groups.into_iter().flatten().collect();
+        Ok(out)
     }
 
     // ---- looking -----------------------------------------------------
@@ -832,13 +1009,14 @@ impl Probe {
                 files.push("screen.png");
             }
         }
-        let repro = json!({"trix": self.cfg.trix.display().to_string(), "actions": self.actions});
+        let repro = json!({"trix": self.trix.display().to_string(), "actions": self.actions});
         std::fs::write(dir.join("repro.json"), serde_json::to_string_pretty(&repro)?)?;
         files.push("repro.json");
         let mut issue = a.clone();
         issue["id"] = json!(n);
         issue["dir"] = json!(dir.display().to_string());
         issue["files"] = json!(files);
+        issue["trix"] = json!(self.trix.display().to_string());
         issue["trix_version"] = json!(self.trix_version());
         std::fs::write(dir.join("issue.md"), issue_markdown(&issue))?;
         self.issues.push(issue);
@@ -850,20 +1028,27 @@ impl Probe {
         )))
     }
 
+    /// `trix --version` of the trix this session runs.
     pub fn trix_version(&self) -> String {
-        std::process::Command::new(&self.cfg.trix)
-            .arg("--version")
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "unknown".into())
+        version_of(&self.trix)
     }
 
     pub fn write_report(&self) -> Result<()> {
         std::fs::create_dir_all(&self.cfg.out)?;
         std::fs::write(self.cfg.out.join("issues.json"), serde_json::to_string_pretty(&self.issues)?)?;
-        let mut md = format!("# trix-probe report\n\ntrix: `{}` ({})\n\n", self.cfg.trix.display(), self.trix_version());
+        // Every binary an issue was found in (a session can launch several).
+        let mut binaries: Vec<(String, String)> = Vec::new();
+        for i in &self.issues {
+            let b = (i["trix"].as_str().unwrap_or("").to_string(), i["trix_version"].as_str().unwrap_or("unknown").to_string());
+            if !b.0.is_empty() && !binaries.contains(&b) {
+                binaries.push(b);
+            }
+        }
+        if binaries.is_empty() {
+            binaries.push((self.trix.display().to_string(), self.trix_version()));
+        }
+        let list: Vec<String> = binaries.iter().map(|(p, v)| format!("`{p}` ({v})")).collect();
+        let mut md = format!("# trix-probe report\n\ntrix: {}\n\n", list.join(", "));
         if self.issues.is_empty() {
             md += "No issues reported.\n";
         } else {
@@ -922,7 +1107,7 @@ fn issue_markdown(i: &Value) -> String {
             md += &format!("**{label}:** {}\n\n", s(k));
         }
     }
-    md += &format!("trix {} · ", s("trix_version"));
+    md += &format!("{}{} · ", s("trix_version"),if s("trix").is_empty() { String::new() } else { format!(" (`{}`)", s("trix")) });
     md += "![screen](screen.png)\n";
     md
 }
@@ -955,6 +1140,49 @@ fn process_in_sandbox(pid: i32, root: &Path) -> bool {
     // `ps eww` shows the environment on macOS and Linux.
     let out = std::process::Command::new("ps").args(["eww", "-p", &pid.to_string()]).output();
     out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&root.display().to_string()))
+}
+
+/// A trix binary named by a tool call: `~/` is your home, a relative path
+/// starts where trix-probe was started.
+pub fn resolve_trix(s: &str) -> Result<PathBuf> {
+    let s = s.trim();
+    let p = match s.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
+        None => PathBuf::from(s),
+    };
+    let p = std::fs::canonicalize(&p).with_context(|| format!("trix binary {} not found", p.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(&p)?;
+    anyhow::ensure!(meta.is_file() && meta.permissions().mode() & 0o111 != 0, "{} is not an executable file", p.display());
+    Ok(p)
+}
+
+/// `trix --version` of a binary, or "unknown".
+pub fn version_of(trix: &Path) -> String {
+    std::process::Command::new(trix)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// A terminal size as "80x24", [80, 24] or {"cols": 80, "rows": 24}.
+fn parse_size(v: &Value) -> Result<(u16, u16)> {
+    let pair = match v {
+        Value::String(s) => {
+            let (c, r) = s.trim().split_once(['x', 'X', '×']).with_context(|| format!("size {s:?} isn't COLSxROWS, e.g. \"80x24\""))?;
+            (c.trim().parse::<u64>().ok(), r.trim().parse::<u64>().ok())
+        }
+        Value::Array(a) if a.len() == 2 => (a[0].as_u64(), a[1].as_u64()),
+        Value::Object(o) => (o.get("cols").and_then(Value::as_u64), o.get("rows").and_then(Value::as_u64)),
+        _ => (None, None),
+    };
+    match pair {
+        (Some(c), Some(r)) => Ok((c.clamp(10, 400) as u16, r.clamp(3, 200) as u16)),
+        _ => bail!("size {v} isn't COLSxROWS, e.g. \"80x24\""),
+    }
 }
 
 pub fn str_list(v: Option<&Value>) -> Vec<String> {

@@ -175,6 +175,57 @@ pub fn png(snap: &Snapshot, px: f32) -> Result<Vec<u8>> {
     encode_png(&cv)
 }
 
+/// Several screens on one PNG, each under its label, left to right and
+/// wrapping onto new rows: a contact sheet for `sweep` and `compare`.
+pub fn sheet(tiles: &[(&str, &Snapshot)], px: f32) -> Result<Vec<u8>> {
+    use crate::term::Cell;
+    anyhow::ensure!(!tiles.is_empty(), "no screens to put on a sheet");
+    // Wide enough for two 100-column screens side by side.
+    const MAX_COLS: usize = 210;
+    const GAP: usize = 3;
+    let bg = Rgb { r: 0x2a, g: 0x2a, b: 0x2e };
+    let fg = Rgb { r: 0xc8, g: 0xc8, b: 0xd0 };
+    let blank = Cell { text: " ".into(), fg, bg, bold: false, underline: false, strike: false, hidden: false, wide: false, spacer: false };
+    // (col, row) of each tile's label; the screen goes right under it.
+    let mut at = Vec::new();
+    let (mut x, mut y, mut line_h, mut width) = (0usize, 0usize, 0usize, 0usize);
+    for (_, s) in tiles {
+        if x > 0 && x + s.cols > MAX_COLS {
+            y += line_h + 1;
+            x = 0;
+            line_h = 0;
+        }
+        at.push((x, y));
+        width = width.max(x + s.cols);
+        x += s.cols + GAP;
+        line_h = line_h.max(s.rows + 1);
+    }
+    let height = y + line_h;
+    let mut cells = vec![vec![blank.clone(); width]; height];
+    for ((label, s), &(x, y)) in tiles.iter().zip(&at) {
+        for (i, ch) in label.chars().take(s.cols).enumerate() {
+            cells[y][x + i] = Cell { text: ch.to_string(), bold: true, ..blank.clone() };
+        }
+        for (r, row) in s.cells.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                cells[y + 1 + r][x + c] = cell.clone();
+            }
+        }
+    }
+    let composite = Snapshot {
+        cols: width,
+        rows: height,
+        cells,
+        cursor: (0, 0),
+        cursor_visible: false,
+        cursor_shape: CursorShape::Block,
+        title: None,
+        fg,
+        bg,
+    };
+    png(&composite, px)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn glyph(cv: &mut Canvas, fonts: &Fonts, m: &Metrics, ch: char, x: i32, y: i32, cw: i32, fg: Rgb, bold: bool) {
     let found = fonts.list.iter().find(|f| f.glyph_id(ch).0 != 0);
