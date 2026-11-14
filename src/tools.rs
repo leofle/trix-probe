@@ -1,0 +1,249 @@
+//! The tools a model uses to drive trix, shared by the MCP server and the
+//! autonomous runner: their schemas, and dispatch onto a `Probe`.
+
+use crate::probe::{Probe, ToolOut};
+use serde_json::{Value, json};
+
+const TERMINAL: &str = "Which terminal (default \"main\", the one launch opened).";
+const SHOT: &str = "What to return after the action: \"text\" (default: the screen as text with row numbers), \"png\" (an image in real colors), \"both\", or \"none\".";
+
+fn shot() -> Value {
+    json!({"type": "string", "enum": ["text", "png", "both", "none"], "description": SHOT})
+}
+fn term() -> Value {
+    json!({"type": "string", "description": TERMINAL})
+}
+fn wait() -> Value {
+    json!({"type": "integer", "description": "How long to let the screen settle before looking, in ms (default 1500; it returns early once the screen is still for 250 ms)."})
+}
+
+pub fn definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "launch",
+            "description": "Start a fresh, isolated trix in a virtual terminal and show its first screen. Any previous session is torn down first. The sandbox has its own HOME, config and runtime folders, so the user's real trix and agents are never touched. By default every agent kind (claude, codex, …) is a scriptable FAKE agent: it fires trix's real hooks, so trix shows working / needs-you / done just as with a real one. Type `help` into a fake agent's pane to see the words that make it ask for permission, ask a question, work for long, flood output, crash, and so on. Agents start in a demo git repo with an uncommitted change. Desktop notifications, sounds and clipboard copies are captured, not delivered; they show up in each result under 'since the last action'.",
+            "input_schema": {"type": "object", "properties": {
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Arguments to trix, e.g. [] for an empty workspace, [\"claude\", \"shell\"] to open those agents, [\"-s\", \"work\"] for a named session."},
+                "cols": {"type": "integer", "description": "Terminal width (default 140)."},
+                "rows": {"type": "integer", "description": "Terminal height (default 40)."},
+                "agents": {"type": "string", "enum": ["fake", "real"], "description": "fake (default) or real agents from PATH with the real HOME (costs tokens, uses the user's accounts; only when asked)."},
+                "terminal_colors": {"type": "string", "enum": ["dark", "light"], "description": "The outer terminal's own color scheme (default dark). Try light to catch UI that only reads well on dark."},
+                "keyboard": {"type": "string", "enum": ["legacy", "kitty"], "description": "legacy (default: alt is an ESC prefix, like Terminal.app/iTerm2) or kitty (the kitty keyboard protocol, like Ghostty/kitty/WezTerm, an approximation)."},
+                "config_toml": {"type": "string", "description": "Contents for ~/.config/trix/config.toml (optional). A [notify] block that logs notifications is added unless you write your own."},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Extra environment variables for trix, e.g. {\"TRIX_THEME\": \"…\"}."},
+                "cwd": {"type": "string", "description": "Folder to start trix in, relative to the sandbox (default work/demo)."},
+                "screenshot": shot(),
+            }},
+        }),
+        json!({
+            "name": "screen",
+            "description": "Look at the screen now, without doing anything. Default format both (text and image).",
+            "input_schema": {"type": "object", "properties": {"terminal": term(), "format": shot()}},
+        }),
+        json!({
+            "name": "press",
+            "description": "Press keys, one after another, as a person would. Key names: alt+n, ctrl+c, enter, esc, tab, shift+tab, backspace, up/down/left/right, home, end, pgup, pgdn, delete, f1..f12, space, alt+, (comma), alt+? , alt+plus, ctrl+down, shift+pgup, or a single character like y or 1. Every trix shortcut is alt+something. Returns the screen afterwards.",
+            "input_schema": {"type": "object", "properties": {
+                "keys": {"type": "array", "items": {"type": "string"}, "description": "Keys in order, e.g. [\"alt+n\"] or [\"down\", \"down\", \"enter\"]."},
+                "delay_ms": {"type": "integer", "description": "Pause between keys (default 80)."},
+                "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
+            }, "required": ["keys"]},
+        }),
+        json!({
+            "name": "type_text",
+            "description": "Type text into whatever has focus (an agent's prompt, a form field, a search box), character by character. Newlines press Enter. paste: true sends it as one bracketed paste instead, like pasting from the clipboard.",
+            "input_schema": {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "enter": {"type": "boolean", "description": "Press Enter afterwards (default false)."},
+                "paste": {"type": "boolean"},
+                "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
+            }, "required": ["text"]},
+        }),
+        json!({
+            "name": "click",
+            "description": "Click with the mouse at a row and column (from 0, as the text screen numbers them), or on text shown on screen (its middle). trix's bottom-bar keys, pins, sidebar cards and the needs-you strip are clickable.",
+            "input_schema": {"type": "object", "properties": {
+                "row": {"type": "integer"}, "col": {"type": "integer"},
+                "text": {"type": "string", "description": "Click this text instead of row/col."},
+                "nth": {"type": "integer", "description": "Which match of text, from 0 (default 0)."},
+                "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                "double": {"type": "boolean", "description": "Double-click."},
+                "modifiers": {"type": "array", "items": {"type": "string", "enum": ["shift", "alt", "ctrl"]}},
+                "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
+            }},
+        }),
+        json!({
+            "name": "drag",
+            "description": "Press the left button at one place, move to another, release: selecting text, for instance. Give from_row/from_col or from_text, and to_row/to_col or to_text.",
+            "input_schema": {"type": "object", "properties": {
+                "from_row": {"type": "integer"}, "from_col": {"type": "integer"}, "from_text": {"type": "string"},
+                "to_row": {"type": "integer"}, "to_col": {"type": "integer"}, "to_text": {"type": "string"},
+                "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
+            }},
+        }),
+        json!({
+            "name": "scroll",
+            "description": "Turn the mouse wheel over a place on screen (row/col or text).",
+            "input_schema": {"type": "object", "properties": {
+                "row": {"type": "integer"}, "col": {"type": "integer"}, "text": {"type": "string"},
+                "direction": {"type": "string", "enum": ["up", "down"]},
+                "amount": {"type": "integer", "description": "Wheel steps (default 3)."},
+                "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
+            }, "required": ["direction"]},
+        }),
+        json!({
+            "name": "resize",
+            "description": "Resize the terminal window, as dragging its corner would. Try small sizes (80x24, 60x15) and very wide ones.",
+            "input_schema": {"type": "object", "properties": {
+                "cols": {"type": "integer"}, "rows": {"type": "integer"},
+                "terminal": term(), "screenshot": shot(), "wait_ms": wait(),
+            }, "required": ["cols", "rows"]},
+        }),
+        json!({
+            "name": "set_focus",
+            "description": "Tell trix its terminal window gained or lost focus (the user switched to another app). trix notifies differently when unfocused.",
+            "input_schema": {"type": "object", "properties": {"focused": {"type": "boolean"}, "terminal": term()}, "required": ["focused"]},
+        }),
+        json!({
+            "name": "wait_for",
+            "description": "Wait until text (or a regex) appears on screen, or with gone: true until it disappears. Use it instead of guessing sleep times, e.g. wait for an agent to finish.",
+            "input_schema": {"type": "object", "properties": {
+                "text": {"type": "string"}, "regex": {"type": "string"},
+                "gone": {"type": "boolean"},
+                "timeout_ms": {"type": "integer", "description": "Default 10000, at most 120000."},
+                "terminal": term(), "screenshot": shot(),
+            }},
+        }),
+        json!({
+            "name": "sleep",
+            "description": "Do nothing for a while (time passing matters: timers, 'time in state', the clock, animations), then look.",
+            "input_schema": {"type": "object", "properties": {"ms": {"type": "integer"}, "terminal": term(), "screenshot": shot()}, "required": ["ms"]},
+        }),
+        json!({
+            "name": "find_text",
+            "description": "Where text appears on screen: row and column of each match.",
+            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}, "terminal": term()}, "required": ["text"]},
+        }),
+        json!({
+            "name": "open_terminal",
+            "description": "Open another terminal window on the same sandbox, running trix with these args: [\"view\"] to watch read-only, [] or [\"attach\"] to attach (e.g. after closing the main one), [\"-s\", \"work\"] for another session. The new window starts focused.",
+            "input_schema": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "A name for it, used as `terminal` in other tools."},
+                "args": {"type": "array", "items": {"type": "string"}},
+                "cols": {"type": "integer"}, "rows": {"type": "integer"}, "screenshot": shot(),
+            }, "required": ["name"]},
+        }),
+        json!({
+            "name": "close_terminal",
+            "description": "Close a terminal window: how \"hangup\" (default) is closing the window or losing SSH, \"kill\" is the terminal app crashing. The trix server and its agents should keep running; reattach with open_terminal.",
+            "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "how": {"type": "string", "enum": ["hangup", "kill"]}}},
+        }),
+        json!({
+            "name": "run_trix",
+            "description": "Run a trix command in the sandbox, outside the terminal, and get its exit code and output: ls, ls --json, spawn, send, read, wait, close, events, layout save/open/ls/rm, config, kill. This is how scripts and other agents use trix (see the docs' Agent control).",
+            "input_schema": {"type": "object", "properties": {
+                "args": {"type": "array", "items": {"type": "string"}, "description": "e.g. [\"spawn\", \"claude\", \"--name\", \"api\", \"--prompt\", \"permission\"]"},
+                "stdin": {"type": "string"},
+                "timeout_ms": {"type": "integer", "description": "Default 15000."},
+            }, "required": ["args"]},
+        }),
+        json!({
+            "name": "kill_server",
+            "description": "Crash the trix server (SIGKILL by default, or a polite TERM), to test what the terminal shows and whether the next trix offers to restore the workspace.",
+            "input_schema": {"type": "object", "properties": {"signal": {"type": "string", "enum": ["KILL", "TERM"]}}},
+        }),
+        json!({
+            "name": "read_file",
+            "description": "Read a file, or list a folder, inside the sandbox: relative paths start at the sandbox root (xdg/config/trix/config.toml, xdg/state/trix/workspace.json, work/demo, run/trix/server.log), and ~ is the sandbox HOME.",
+            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "max_bytes": {"type": "integer"}}, "required": ["path"]},
+        }),
+        json!({
+            "name": "write_file",
+            "description": "Write (or append to) a file inside the sandbox, e.g. edit xdg/config/trix/config.toml to test live reload and config errors (trix reloads within a second), or create folders for agents. Returns the screen afterwards.",
+            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "append": {"type": "boolean"}}, "required": ["path", "content"]},
+        }),
+        json!({
+            "name": "fake_agent",
+            "description": "Make a fake agent do something now, from outside, by its name or number in the sidebar: turn (a normal short turn; text = its prompt), permission (asks to run rm -rf dist and waits: needs-you), question (asks which database: needs-you), long (~30 s of work), flood (3000 lines), unicode, silent (a turn with no hooks), crash (exit 1), exit, answer (answer an open dialog; key \"1\", \"3\", \"enter\" or \"esc\"), interrupt, output (print text, no hooks), title (set the terminal title to text), bell, context (set the context gauge: percent), hook (fire one raw hook: event, payload), status. You can also do all of this by typing into the agent's pane, as a person would.",
+            "input_schema": {"type": "object", "properties": {
+                "agent": {"type": "string", "description": "Its name (e.g. \"claude\" or a renamed one) or its number."},
+                "action": {"type": "string", "enum": ["turn", "permission", "question", "long", "flood", "unicode", "silent", "crash", "exit", "answer", "interrupt", "output", "title", "bell", "context", "hook", "status", "help"]},
+                "text": {"type": "string"}, "key": {"type": "string"}, "percent": {"type": "number"},
+                "event": {"type": "string"}, "payload": {"type": "object"},
+                "screenshot": shot(), "wait_ms": wait(),
+            }, "required": ["agent", "action"]},
+        }),
+        json!({
+            "name": "observations",
+            "description": "Everything recorded so far, in full: agent state changes (from trix events), notifications, sounds, clipboard copies, bells and titles, the server log, and the hooks fake agents fired.",
+            "input_schema": {"type": "object", "properties": {
+                "what": {"type": "string", "enum": ["all", "events", "notifications", "sounds", "clipboard", "bells", "server_log", "fake_logs"]},
+                "last": {"type": "integer", "description": "Lines per section (default 30)."},
+            }},
+        }),
+        json!({
+            "name": "report_issue",
+            "description": "Record a bug or UX problem you found. The current screen (text and image) and every action since launch (a replayable repro script) are saved with it. Report each distinct problem once, as soon as you've confirmed it; reproduce it a second time first when you can.",
+            "input_schema": {"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["bug", "ux", "crash", "performance", "docs", "accessibility"], "description": "docs: the app disagrees with its documentation."},
+                "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                "confidence": {"type": "string", "enum": ["confirmed", "likely", "unsure"], "description": "confirmed: reproduced twice; unsure: might be a quirk of this test harness."},
+                "title": {"type": "string", "description": "One line: what's wrong."},
+                "steps": {"type": "array", "items": {"type": "string"}, "description": "Steps from launch, specific enough to follow by hand."},
+                "expected": {"type": "string"}, "actual": {"type": "string"},
+                "notes": {"type": "string", "description": "Why it matters, a guess at the cause, a workaround."},
+                "terminal": term(),
+            }, "required": ["kind", "severity", "title", "steps", "expected", "actual"]},
+        }),
+        json!({
+            "name": "teardown",
+            "description": "Stop trix and remove the sandbox. launch does this for you; call it at the end.",
+            "input_schema": {"type": "object", "properties": {}},
+        }),
+    ]
+}
+
+/// Tools whose calls are part of a repro script.
+fn is_action(name: &str) -> bool {
+    !matches!(name, "screen" | "find_text" | "observations" | "report_issue" | "read_file" | "teardown")
+}
+
+pub fn call(p: &mut Probe, name: &str, args: &Value) -> ToolOut {
+    let args = if args.is_null() { json!({}) } else { args.clone() };
+    let r = match name {
+        "launch" => p.launch(&args),
+        "screen" => p.screen(&args),
+        "press" => p.press(&args),
+        "type_text" => p.type_text(&args),
+        "click" => p.click(&args),
+        "drag" => p.drag(&args),
+        "scroll" => p.scroll(&args),
+        "resize" => p.resize(&args),
+        "set_focus" => p.set_focus(&args),
+        "wait_for" => p.wait_for(&args),
+        "sleep" => p.sleep(&args),
+        "find_text" => p.find_text(&args),
+        "open_terminal" => p.open_terminal(&args),
+        "close_terminal" => p.close_terminal(&args),
+        "run_trix" => p.run_trix(&args),
+        "kill_server" => p.kill_server(&args),
+        "read_file" => p.read_file(&args),
+        "write_file" => p.write_file(&args),
+        "fake_agent" => p.fake_agent(&args),
+        "observations" => p.observations(&args),
+        "report_issue" => p.report_issue(&args),
+        "teardown" => {
+            p.teardown();
+            Ok(ToolOut::text("stopped trix and removed the sandbox"))
+        }
+        other => Err(anyhow::anyhow!("unknown tool '{other}'")),
+    };
+    if is_action(name) {
+        // launch starts a new script; a failed launch leaves none.
+        if name == "launch" {
+            p.actions.clear();
+        }
+        p.actions.push(json!({"tool": name, "args": args}));
+    }
+    r.unwrap_or_else(|e| ToolOut::error(format!("error: {e:#}")))
+}
