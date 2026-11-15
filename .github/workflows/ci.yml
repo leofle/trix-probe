@@ -84,11 +84,14 @@ jobs:
           ref: ${{ matrix.trix }}
           path: trix-src
 
+      # A build from source still reports the last release's version, so
+      # TRIX_PROBE_UNRELEASED runs the regressions marked fixed_in a later one.
       - name: Build trix (${{ matrix.trix }})
         if: matrix.trix != 'release'
         run: |
           cargo build --release --locked --manifest-path trix-src/Cargo.toml
           echo "TRIX_PROBE_TRIX=$GITHUB_WORKSPACE/trix-src/target/release/trix" >> "$GITHUB_ENV"
+          echo "TRIX_PROBE_UNRELEASED=1" >> "$GITHUB_ENV"
 
       - name: Build trix-probe
         run: cargo build --locked

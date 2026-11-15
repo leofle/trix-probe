@@ -1,0 +1,116 @@
+{
+ "title": "The top bar drops whole items when narrow, keeps a gap, and keeps 'needs you' longest",
+ "fixed_in": "1.0.8",
+ "notes": "trix 1.0.7 drew the right side ('focus · 19:14') over the status mid-word in narrow windows: '▲ 1 needs yfocus' at 44 columns, '▲ 1 neefocus' at 40. Fixed in leofle/trix#47.",
+ "actions": [
+  {
+   "tool": "launch",
+   "args": {
+    "args": [
+     "claude",
+     "shell"
+    ],
+    "cols": 80,
+    "rows": 12
+   }
+  },
+  {
+   "tool": "wait_for",
+   "args": {
+    "text": "2 idle",
+    "timeout_ms": 15000
+   }
+  },
+  {
+   "tool": "press",
+   "args": {
+    "keys": [
+     "alt+1"
+    ]
+   }
+  },
+  {
+   "tool": "type_text",
+   "args": {
+    "text": "permission",
+    "enter": true
+   }
+  },
+  {
+   "tool": "wait_for",
+   "args": {
+    "text": "1 needs you",
+    "timeout_ms": 15000
+   }
+  },
+  {
+   "tool": "resize",
+   "args": {
+    "cols": 44,
+    "rows": 12
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 0,
+    "regex": "▲ 1 needs you {3,}focus",
+    "why": "44 cols: whole items, 3+ spaces before the right side"
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 0,
+    "regex": "\\Sfocus",
+    "absent": true,
+    "why": "44 cols: nothing glued to the right side"
+   }
+  },
+  {
+   "tool": "resize",
+   "args": {
+    "cols": 40,
+    "rows": 12
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 0,
+    "regex": "▲ 1 needs you {3,}\\d\\d:\\d\\d$",
+    "why": "40 cols: 'focus' drops whole, the gap stays"
+   }
+  },
+  {
+   "tool": "resize",
+   "args": {
+    "cols": 30,
+    "rows": 12
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 0,
+    "regex": "^ ◆ trix +▲ 1 needs you$",
+    "why": "30 cols: the clock drops before 'needs you'"
+   }
+  },
+  {
+   "tool": "resize",
+   "args": {
+    "cols": 24,
+    "rows": 12
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 0,
+    "regex": "▲ 1 needs you$",
+    "why": "24 cols: 'needs you' is still whole"
+   }
+  }
+ ]
+}
