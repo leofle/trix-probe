@@ -42,7 +42,7 @@ Then ask, for example:
 
 > With trix-probe, open three fake claude agents, make the one I'm not looking at ask for permission, and check the needs-you strip, alt+a, the notification and the sound. Then do it again while the window is unfocused.
 
-Each call returns the screen. Every action is logged, so `report_issue` saves the steps that led to the bug.
+Each call returns the screen: whole at first, after a resize and every eighth look; otherwise only the rows whose text changed since the model last saw it (the clock, timers and spinners ticking don't count), plus a note of rows whose colors alone changed. Runs of identical rows are folded into one line. `screen` and `screenshot: "full"` always show it all. Actions wait for the screen to settle the same way: a working agent's spinner doesn't hold them up. Every action is logged, so `report_issue` saves the steps that led to the bug.
 
 ### Testing a branch
 

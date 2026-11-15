@@ -39,7 +39,11 @@ pub struct ProbeConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Shot {
     None,
+    /// The screen as text: only the rows that changed since the model last
+    /// saw it, when that's few (see `Probe::screen_text`).
     Text,
+    /// The whole screen as text, always.
+    Full,
     Png,
     Both,
 }
@@ -49,6 +53,7 @@ impl Shot {
         match v.and_then(Value::as_str) {
             Some("none") => Shot::None,
             Some("text") => Shot::Text,
+            Some("full") => Shot::Full,
             Some("png") | Some("image") => Shot::Png,
             Some("both") => Shot::Both,
             _ => default,
@@ -148,7 +153,24 @@ pub struct Probe {
     last_seen: Instant,
     offsets: BTreeMap<String, u64>,
     shots: u32,
+    /// The screen of each terminal as the model last saw it, to send only
+    /// what changed.
+    looked: BTreeMap<String, Looked>,
 }
+
+/// A screen the model has seen.
+struct Looked {
+    size: (usize, usize),
+    /// Masked rows: the clock and spinners ticking isn't a change.
+    rows: Vec<String>,
+    styles: Vec<u64>,
+    /// Partial screens sent since the last whole one.
+    partial: u32,
+}
+
+/// After this many partial screens the next is whole again, in case the
+/// client has dropped old results from its context (explore keeps 10).
+const WHOLE_EVERY: u32 = 8;
 
 impl Probe {
     pub fn new(cfg: ProbeConfig) -> Probe {
@@ -169,6 +191,7 @@ impl Probe {
             last_seen: Instant::now(),
             offsets: BTreeMap::new(),
             shots: 0,
+            looked: BTreeMap::new(),
         }
     }
 
@@ -191,6 +214,7 @@ impl Probe {
     pub fn teardown(&mut self) {
         self.events = None;
         self.terms.clear();
+        self.looked.clear();
         if let Some(sb) = self.sb.take() {
             sb.teardown();
             crate::cleanup::forget(&sb.root);
@@ -259,7 +283,7 @@ impl Probe {
         self.spawn_terminal("main", &args, (cols, rows), Some(&cwd))?;
         // trix may take a moment to start its server.
         let t = self.term(None)?;
-        t.settle(Duration::from_millis(400), Duration::from_millis(4000));
+        t.settle_output(Duration::from_millis(400), Duration::from_millis(4000));
         if let Some(f) = keys::focus(true, t.mode()) {
             t.write(f);
         }
@@ -275,6 +299,7 @@ impl Probe {
         let cwd = cwd.map(Path::to_path_buf).unwrap_or_else(|| sb.demo_repo());
         let t = Terminal::spawn(&sb.trix, args, &cwd, &sb.env, size, self.palette.clone(), self.keyboard)?;
         self.terms.insert(name.to_string(), t);
+        self.looked.remove(name);
         Ok(())
     }
 
@@ -303,6 +328,7 @@ impl Probe {
         std::thread::sleep(Duration::from_millis(300));
         let exited = t.exited();
         self.terms.remove(&name);
+        self.looked.remove(&name);
         Ok(ToolOut::text(format!(
             "closed terminal '{name}' ({}){}.{}",
             if how == "kill" { "SIGKILL, like a crashed terminal" } else { "SIGHUP, like closing the window" },
@@ -647,7 +673,7 @@ impl Probe {
         );
         for (label, snap) in groups.iter().flatten() {
             match shot {
-                Shot::Text | Shot::Both => text += &format!("\n── {label}\n{}", snap.to_text()),
+                Shot::Text | Shot::Full | Shot::Both => text += &format!("\n── {label}\n{}", snap.to_text()),
                 Shot::Png => text += &format!("── {label}: in the images\n"),
                 Shot::None => {}
             }
@@ -661,7 +687,11 @@ impl Probe {
     // ---- looking -----------------------------------------------------
 
     pub fn screen(&mut self, a: &Value) -> Result<ToolOut> {
-        self.screen_out(a.get("terminal").and_then(Value::as_str), Shot::parse(a.get("format").or(a.get("screenshot")), Shot::Both))
+        let shot = match Shot::parse(a.get("format").or(a.get("screenshot")), Shot::Both) {
+            Shot::Text => Shot::Full,
+            s => s,
+        };
+        self.screen_out(a.get("terminal").and_then(Value::as_str), shot)
     }
 
     pub fn snapshot(&self, name: Option<&str>) -> Result<Snapshot> {
@@ -682,8 +712,12 @@ impl Probe {
             text += &format!("⚠ the program in terminal '{label}' has exited ({}). Its last screen:\n", code.map_or("killed by a signal".into(), |c| format!("code {c}")));
         }
         match shot {
-            Shot::Text | Shot::Both => text += &snap.to_text(),
-            Shot::Png => text += &format!("[{}x{} screen of '{label}' as an image]\n", snap.cols, snap.rows),
+            Shot::Full => text += &self.screen_text(label, &snap, true),
+            Shot::Text | Shot::Both => text += &self.screen_text(label, &snap, false),
+            Shot::Png => {
+                text += &format!("[{}x{} screen of '{label}' as an image]\n", snap.cols, snap.rows);
+                self.screen_text(label, &snap, true);
+            }
             Shot::None => {}
         }
         if matches!(shot, Shot::Png | Shot::Both) {
@@ -695,6 +729,47 @@ impl Probe {
         let changes = self.changes();
         out.text = format!("{text}{changes}");
         Ok(out)
+    }
+
+    /// The screen as text for the model, and a note that it has seen it.
+    /// Whole the first time, after a resize, every `WHOLE_EVERY` looks, or
+    /// when most rows changed; otherwise only the rows whose text changed.
+    /// The clock, durations and spinners ticking don't count as changes.
+    fn screen_text(&mut self, label: &str, snap: &Snapshot, whole: bool) -> String {
+        let rows = crate::mask::rows(snap);
+        let styles: Vec<u64> = (0..snap.rows).map(|r| snap.row_style(r)).collect();
+        let size = (snap.cols, snap.rows);
+        let prev = self.looked.get(label).filter(|p| p.size == size);
+        let changed: Vec<usize> = match prev {
+            Some(p) => (0..snap.rows).filter(|&r| rows[r] != p.rows[r]).collect(),
+            None => (0..snap.rows).collect(),
+        };
+        let whole = whole || prev.is_none_or(|p| p.partial >= WHOLE_EVERY) || changed.len() * 2 > snap.rows;
+        let text = if whole {
+            snap.to_text()
+        } else {
+            let p = prev.unwrap();
+            let restyled: Vec<usize> = (0..snap.rows).filter(|&r| !changed.contains(&r) && styles[r] != p.styles[r]).collect();
+            let mut t = if changed.is_empty() {
+                format!("{}\nThe text on screen is as you last saw it (the clock, timers and spinners aside).\n", snap.header())
+            } else {
+                format!(
+                    "{}\n{} of {} rows changed since you last saw the screen; only those are shown, the rest are as they were (screenshot \"full\" shows all).\n{}\n{}",
+                    snap.header(),
+                    changed.len(),
+                    snap.rows,
+                    snap.ruler(),
+                    snap.rows_text(&changed)
+                )
+            };
+            if !restyled.is_empty() {
+                t += &format!("Colors or styles changed, text the same, on row(s) {} (png shows them).\n", crate::compare::ranges(&restyled));
+            }
+            t
+        };
+        let partial = if whole { 0 } else { prev.map_or(0, |p| p.partial) + 1 };
+        self.looked.insert(label.to_string(), Looked { size, rows, styles, partial });
+        text
     }
 
     // ---- what happened -----------------------------------------------

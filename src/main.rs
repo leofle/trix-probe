@@ -6,6 +6,7 @@ mod compare;
 mod explore;
 mod fake;
 mod keys;
+mod mask;
 mod mcp;
 mod probe;
 mod render;

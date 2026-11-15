@@ -5,16 +5,16 @@ use crate::probe::{Probe, ToolOut};
 use serde_json::{Value, json};
 
 const TERMINAL: &str = "Which terminal (default \"main\", the one launch opened).";
-const SHOT: &str = "What to return after the action: \"text\" (default: the screen as text with row numbers), \"png\" (an image in real colors), \"both\", or \"none\".";
+const SHOT: &str = "What to return after the action: \"text\" (default: the screen as text with row numbers; when only a few rows changed since you last saw it, just those rows), \"full\" (the whole screen as text), \"png\" (an image in real colors), \"both\" (text and png), or \"none\".";
 
 fn shot() -> Value {
-    json!({"type": "string", "enum": ["text", "png", "both", "none"], "description": SHOT})
+    json!({"type": "string", "enum": ["text", "full", "png", "both", "none"], "description": SHOT})
 }
 fn term() -> Value {
     json!({"type": "string", "description": TERMINAL})
 }
 fn wait() -> Value {
-    json!({"type": "integer", "description": "How long to let the screen settle before looking, in ms (default 1500; it returns early once the screen is still for 250 ms)."})
+    json!({"type": "integer", "description": "How long to let the screen settle before looking, in ms (default 1500; it returns early once the screen is still for 250 ms, the clock and spinners aside)."})
 }
 
 pub fn definitions() -> Vec<Value> {
@@ -38,7 +38,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "screen",
-            "description": "Look at the screen now, without doing anything. Default format both (text and image).",
+            "description": "Look at the screen now, without doing anything: always the whole screen. Default format both (text and image).",
             "input_schema": {"type": "object", "properties": {"terminal": term(), "format": shot()}},
         }),
         json!({
