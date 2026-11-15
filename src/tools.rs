@@ -1,7 +1,8 @@
 //! The tools a model uses to drive trix, shared by the MCP server and the
 //! autonomous runner: their schemas, and dispatch onto a `Probe`.
 
-use crate::probe::{Probe, ToolOut};
+use crate::probe::{Probe, Shot, ToolOut, clip};
+use anyhow::Context;
 use serde_json::{Value, json};
 
 const TERMINAL: &str = "Which terminal (default \"main\", the one launch opened).";
@@ -117,6 +118,16 @@ pub fn definitions() -> Vec<Value> {
             }, "required": ["sizes"]},
         }),
         json!({
+            "name": "batch",
+            "description": "Run several actions in one call, in order, and look once at the end: for steps you already know (open a form, fill it in, submit it; send three prompts). Each step is a tool call as {\"tool\": \"press\", \"args\": {…}}. The steps' own screens are skipped, but what each reports is kept: a wait_for's result, find_text's matches, run_trix's output, and what a person would have noticed. It stops at the first step that fails (stop_on_error: false goes on). Each step goes into the repro on its own.",
+            "input_schema": {"type": "object", "properties": {
+                "steps": {"type": "array", "items": {"type": "object"}, "description": "The tool calls in order, e.g. [{\"tool\": \"press\", \"args\": {\"keys\": [\"alt+n\"]}}, {\"tool\": \"type_text\", \"args\": {\"text\": \"review\", \"enter\": true}}, {\"tool\": \"wait_for\", \"args\": {\"text\": \"done\"}}]."},
+                "stop_on_error": {"type": "boolean", "description": "Stop at the first step that fails (default true)."},
+                "terminal": {"type": "string", "description": "Which terminal to show at the end (default \"main\")."},
+                "screenshot": shot(),
+            }, "required": ["steps"]},
+        }),
+        json!({
             "name": "compare",
             "description": "Run the same steps on two trix binaries, one after the other in matching fresh sandboxes, and show where their screens and observations differ: before/after a fix, a branch against main. Steps are tool calls ({\"tool\": \"press\", \"args\": {…}}) starting with launch; leave them out to replay what this session has done since its launch. Clock, durations, spinners, sparklines and fake-agent ids are masked so only real differences show. Your own session is left as it is. Before/after images of each differing screen are saved.",
             "input_schema": {"type": "object", "properties": {
@@ -190,7 +201,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "write_file",
-            "description": "Write (or append to) a file inside the sandbox, e.g. edit xdg/config/trix/config.toml to test live reload and config errors (trix reloads within a second), or create folders for agents. Returns the screen afterwards.",
+            "description": "Write (or append to) a file inside the sandbox, e.g. edit xdg/config/trix/config.toml to test live reload and config errors, or create folders for agents. For one of trix's config files it waits for the screen to show the reload (up to 2.5 s). Returns the screen afterwards.",
             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "append": {"type": "boolean"}}, "required": ["path", "content"]},
         }),
         json!({
@@ -237,7 +248,61 @@ pub fn definitions() -> Vec<Value> {
 /// Tools whose calls are part of a repro script.
 fn is_action(name: &str) -> bool {
     // compare runs its own sandboxes and leaves this session alone.
-    !matches!(name, "screen" | "find_text" | "observations" | "report_issue" | "read_file" | "teardown" | "compare")
+    // A batch's steps are logged one by one, as they run.
+    !matches!(name, "screen" | "find_text" | "observations" | "report_issue" | "read_file" | "teardown" | "compare" | "batch")
+}
+
+/// Several tool calls in one: each step's report without its screen, then
+/// the screen once at the end.
+fn batch(p: &mut Probe, a: &Value) -> anyhow::Result<ToolOut> {
+    let steps = a.get("steps").and_then(Value::as_array).context("steps is required, e.g. [{\"tool\": \"press\", \"args\": {\"keys\": [\"alt+n\"]}}]")?;
+    anyhow::ensure!(!steps.is_empty(), "steps is empty: give at least one tool call");
+    for (i, step) in steps.iter().enumerate() {
+        let tool = step.get("tool").and_then(Value::as_str).with_context(|| format!("step {} has no \"tool\"", i + 1))?;
+        anyhow::ensure!(tool != "batch", "step {}: a batch can't hold another batch", i + 1);
+    }
+    let go_on = a.get("stop_on_error").and_then(Value::as_bool) == Some(false);
+    let mut text = String::new();
+    let mut failed = Vec::new();
+    for (i, step) in steps.iter().enumerate() {
+        let tool = step["tool"].as_str().unwrap_or("");
+        let given = step.get("args").cloned().unwrap_or(json!({}));
+        let mut args = given.clone();
+        if let Some(o) = args.as_object_mut() {
+            o.insert("screenshot".into(), json!("none"));
+            if tool == "screen" {
+                o.insert("format".into(), json!("none"));
+            }
+        }
+        let out = call(p, tool, &args);
+        text += &format!("── {}/{} {tool} {}\n", i + 1, steps.len(), clip(&given.to_string(), 160));
+        for l in out.text.trim().lines() {
+            text += &format!("   {l}\n");
+        }
+        if out.is_error {
+            failed.push(i + 1);
+            if !go_on {
+                if i + 1 < steps.len() {
+                    text += &format!("stopped: step {} failed, so the {} after it didn't run.\n", i + 1, steps.len() - i - 1);
+                }
+                break;
+            }
+        }
+    }
+    let shot = Shot::parse(a.get("screenshot"), Shot::Text);
+    let mut out = match p.screen_out(a.get("terminal").and_then(Value::as_str), shot) {
+        Ok(end) => {
+            let mut end = end;
+            end.text = format!("{text}── the screen after the batch\n{}", end.text);
+            end
+        }
+        Err(e) => ToolOut::text(format!("{text}── no screen to show at the end: {e:#}")),
+    };
+    if !failed.is_empty() {
+        out.is_error = true;
+        out.text = format!("step(s) {failed:?} failed\n{}", out.text);
+    }
+    Ok(out)
 }
 
 pub fn call(p: &mut Probe, name: &str, args: &Value) -> ToolOut {
@@ -253,6 +318,7 @@ pub fn call(p: &mut Probe, name: &str, args: &Value) -> ToolOut {
         "resize" => p.resize(&args),
         "sweep" => p.sweep(&args),
         "compare" => crate::compare::compare(p, &args),
+        "batch" => batch(p, &args),
         "set_focus" => p.set_focus(&args),
         "wait_for" => p.wait_for(&args),
         "sleep" => p.sleep(&args),

@@ -237,6 +237,12 @@ impl Sandbox {
 
     /// Resolve a path the tester gave: relative paths start at the sandbox
     /// root, `~` is the sandbox HOME. Anything outside the sandbox is refused.
+    /// Whether `p` (from `resolve`) is one of trix's own config files, which
+    /// it reloads when they change.
+    pub fn is_trix_config(&self, p: &Path) -> bool {
+        p.starts_with(normalize(&self.root.join("xdg/config/trix")))
+    }
+
     pub fn resolve(&self, p: &str) -> Result<PathBuf> {
         let path = if let Some(rest) = p.strip_prefix("~/") {
             self.home.join(rest)
@@ -378,8 +384,23 @@ fn normalize(p: &Path) -> PathBuf {
             other => out.push(other),
         }
     }
-    // /tmp is /private/tmp on macOS: compare the real path when it exists.
-    std::fs::canonicalize(&out).unwrap_or(out)
+    // /tmp is /private/tmp on macOS: compare real paths. A file about to be
+    // written doesn't exist yet, so resolve the part of it that does.
+    let mut base = out.clone();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(mut real) = std::fs::canonicalize(&base) {
+            real.extend(rest.iter().rev());
+            return real;
+        }
+        match base.file_name() {
+            Some(n) => rest.push(n.to_os_string()),
+            None => return out,
+        }
+        if !base.pop() {
+            return out;
+        }
+    }
 }
 
 #[derive(Debug)]

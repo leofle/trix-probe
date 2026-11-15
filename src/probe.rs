@@ -325,7 +325,10 @@ impl Probe {
         let t = self.terms.get(&name).with_context(|| format!("no terminal named '{name}'"))?;
         let how = a.get("how").and_then(Value::as_str).unwrap_or("hangup");
         t.signal(if how == "kill" { libc::SIGKILL } else { libc::SIGHUP });
-        std::thread::sleep(Duration::from_millis(300));
+        let start = Instant::now();
+        while t.exited().is_none() && start.elapsed() < Duration::from_millis(1000) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let exited = t.exited();
         self.terms.remove(&name);
         self.looked.remove(&name);
@@ -702,7 +705,8 @@ impl Probe {
         crate::render::png(&self.snapshot(name)?, self.cfg.font_px)
     }
 
-    fn screen_out(&mut self, name: Option<&str>, shot: Shot) -> Result<ToolOut> {
+    /// The screen of terminal `name` as `shot` asks, and what happened since the last action.
+    pub fn screen_out(&mut self, name: Option<&str>, shot: Shot) -> Result<ToolOut> {
         let t = self.term(name)?;
         let snap = t.snapshot();
         let mut out = ToolOut::default();
@@ -950,6 +954,7 @@ impl Probe {
         let ps = std::process::Command::new("ps").args(["-axo", "pid=,command="]).output()?;
         let list = String::from_utf8_lossy(&ps.stdout).into_owned();
         let trix = sb.trix.display().to_string();
+        let before = self.term(None).map(Terminal::fingerprint).ok();
         let mut killed = Vec::new();
         for line in list.lines() {
             let line = line.trim();
@@ -967,9 +972,18 @@ impl Probe {
         if killed.is_empty() {
             return Ok(ToolOut::error("no trix server for this sandbox was found"));
         }
-        std::thread::sleep(Duration::from_millis(500));
+        // Wait for the server to be gone, then for the client to show it.
+        let start = Instant::now();
+        let alive = || killed.iter().any(|&pid| unsafe { libc::kill(pid, 0) } == 0);
+        while alive() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let still = if alive() { " It was still running 2 s later." } else { "" };
+        if let (Some(f), Ok(t)) = (before, self.term(None)) {
+            t.wait_change(f, Duration::from_millis(1500));
+        }
         let mut out = self.after(&json!({"wait_ms": 1500, "screenshot": a.get("screenshot")}), Shot::Text)?;
-        out.text = format!("sent {} to the trix server (pid {killed:?}), like a crash.\n{}", if sig == libc::SIGKILL { "SIGKILL" } else { "SIGTERM" }, out.text);
+        out.text = format!("sent {} to the trix server (pid {killed:?}), like a crash.{still}\n{}", if sig == libc::SIGKILL { "SIGKILL" } else { "SIGTERM" }, out.text);
         Ok(out)
     }
 
@@ -999,6 +1013,8 @@ impl Probe {
         let p = a.get("path").and_then(Value::as_str).context("path is required")?;
         let content = a.get("content").and_then(Value::as_str).context("content is required")?;
         let path = self.sb()?.resolve(p)?;
+        let config = self.sb()?.is_trix_config(&path);
+        let before = self.term(None).map(Terminal::fingerprint).ok();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -1007,10 +1023,19 @@ impl Probe {
         } else {
             std::fs::write(&path, content)?;
         }
-        // trix reloads config within a second.
-        std::thread::sleep(Duration::from_millis(1300));
+        // trix looks at its config about once a second, and says what it made
+        // of a change (a toast, a new theme): wait for the screen to show it.
+        let mut note = String::new();
+        if config && let (Some(f), Ok(t)) = (before, self.term(None)) {
+            let start = Instant::now();
+            note = if t.wait_change(f, Duration::from_millis(2500)) {
+                format!("; the screen changed {:.1}s later", start.elapsed().as_secs_f32())
+            } else {
+                "; the screen didn't change within 2.5 s (did trix reload it?)".into()
+            };
+        }
         let mut out = self.after(&json!({"wait_ms": 500, "screenshot": a.get("screenshot")}), Shot::Text)?;
-        out.text = format!("wrote {} ({} bytes)\n{}", path.display(), content.len(), out.text);
+        out.text = format!("wrote {} ({} bytes){note}\n{}", path.display(), content.len(), out.text);
         Ok(out)
     }
 

@@ -227,7 +227,8 @@ pub fn run(mut probe: Probe, opts: ExploreOpts) -> Result<()> {
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": "Session finished. Thank you."}));
                 continue;
             }
-            steps += 1;
+            // A batch spends an action per step.
+            steps += if name == "batch" { input["steps"].as_array().map_or(1, |s| s.len().max(1)) } else { 1 };
             eprintln!("\x1b[2m[{steps}/{}] {name} {}\x1b[0m", opts.max_steps, clip(&input.to_string(), 160));
             let r = crate::tools::call(&mut probe, &name, &input);
             if name == "report_issue" && !r.is_error {

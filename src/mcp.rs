@@ -18,6 +18,7 @@ in an isolated sandbox, to find bugs and UX problems. Start with `launch`; every
 (agent state changes, notifications, sounds, bells, clipboard copies, server log errors). Agents are fake by \
 default: type `help` into one, or use `fake_agent`, to make it ask for permission, ask a question, work for long, \
 crash, and so on. Record each problem with `report_issue`: it saves a screenshot and a replayable repro. \
+`batch` runs several actions in one call and shows the screen once at the end. \
 To test a particular build, pass its path as `launch`'s `trix`. `sweep` looks at many cases at many sizes in one \
 call; `compare` runs the same steps on two binaries and shows what differs (a branch against main). \
 Call `teardown` when done.";

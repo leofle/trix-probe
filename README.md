@@ -6,7 +6,7 @@ trix-probe runs trix in a virtual terminal inside a throwaway sandbox. It turns 
 
 It works two ways:
 
-- **As an MCP server.** Claude Code (or any MCP client) gets 24 tools (`launch`, `press`, `type_text`, `click`, `resize`, `sweep`, `compare`, `fake_agent`, `report_issue`, …) and you steer the testing yourself.
+- **As an MCP server.** Claude Code (or any MCP client) gets 25 tools (`launch`, `press`, `type_text`, `click`, `resize`, `batch`, `sweep`, `compare`, `fake_agent`, `report_issue`, …) and you steer the testing yourself.
 - **On its own.** `trix-probe explore` hands the tools to Claude through the API. Claude explores trix, checks it against the docs and writes a report. Each issue comes with a screenshot and a replayable repro.
 
 ```
@@ -42,7 +42,7 @@ Then ask, for example:
 
 > With trix-probe, open three fake claude agents, make the one I'm not looking at ask for permission, and check the needs-you strip, alt+a, the notification and the sound. Then do it again while the window is unfocused.
 
-Each call returns the screen: whole at first, after a resize and every eighth look; otherwise only the rows whose text changed since the model last saw it (the clock, timers and spinners ticking don't count), plus a note of rows whose colors alone changed. Runs of identical rows are folded into one line. `screen` and `screenshot: "full"` always show it all. Actions wait for the screen to settle the same way: a working agent's spinner doesn't hold them up. Every action is logged, so `report_issue` saves the steps that led to the bug.
+Each call returns the screen: whole at first, after a resize and every eighth look; otherwise only the rows whose text changed since the model last saw it (the clock, timers and spinners ticking don't count), plus a note of rows whose colors alone changed. Runs of identical rows are folded into one line. `screen` and `screenshot: "full"` always show it all. Actions wait for the screen to settle the same way: a working agent's spinner doesn't hold them up. Every action is logged, so `report_issue` saves the steps that led to the bug. `batch` runs several actions in one call and looks once at the end, keeping what each step reported; its steps are logged one by one.
 
 ### Testing a branch
 

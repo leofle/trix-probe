@@ -287,19 +287,37 @@ impl Terminal {
         let start = Instant::now();
         // Give the program a moment to react before we judge quiet.
         std::thread::sleep(Duration::from_millis(40));
-        let mut last = crate::mask::fingerprint(&self.snapshot());
+        let mut last = self.fingerprint();
         let mut same_since = Instant::now();
         while start.elapsed() < max {
             if self.quiet_for() >= quiet || same_since.elapsed() >= quiet {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
-            let now = crate::mask::fingerprint(&self.snapshot());
+            let now = self.fingerprint();
             if now != last {
                 last = now;
                 same_since = Instant::now();
             }
         }
+    }
+
+    /// The screen as `settle` sees it, hashed: see `mask::fingerprint`.
+    pub fn fingerprint(&self) -> u64 {
+        crate::mask::fingerprint(&self.snapshot())
+    }
+
+    /// Wait until the screen differs from `from` (a `fingerprint`), the clock
+    /// and spinners aside, or `max` passes. Whether it changed.
+    pub fn wait_change(&self, from: u64, max: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.fingerprint() != from {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
     }
 
     pub fn signal(&self, sig: i32) {
