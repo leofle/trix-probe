@@ -182,6 +182,8 @@ TRIX_PROBE_TRIX=~/Projects/trix/target/release/trix cargo test --test regression
 
 The regression suite replays every `tests/regressions/*.json` (`{"title", "notes", "actions"}`, the shape of a repro) one at a time and fails if any step fails. `TRIX_PROBE_ONLY=grid` runs just the files whose names contain `grid`. To add one, reproduce the bug with trix-probe, add `expect` steps for what should be on screen, and check it fails on a build with the bug and passes on one without.
 
+When the fix isn't in a trix release yet, give the file `"fixed_in": "1.0.8"` (the first release with it). It's skipped against older trix, so testing the latest release stays green. A build from source still reports the last release's version, so set `TRIX_PROBE_UNRELEASED=1` to run those files against `master` or a branch; CI does this for its source builds.
+
 ```
 src/main.rs     CLI: mcp, explore, replay, compare, try, doctor (+ the internal fake-agent and log-cmd)
 src/probe.rs    a testing session: sandbox, terminals, actions, observations, issues and reports
