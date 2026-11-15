@@ -23,15 +23,21 @@ concurrency:
 
 jobs:
   test:
-    name: test (trix ${{ matrix.trix }})
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, trix ${{ matrix.trix }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         trix: [release, master]
+        # A manual run with a trix ref tests that too, on both systems.
+        # Otherwise these merge into the release jobs and add nothing.
         include:
-          - trix: ${{ inputs.trix_ref != '' && inputs.trix_ref || 'release' }}
+          - os: ubuntu-latest
+            trix: ${{ inputs.trix_ref != '' && inputs.trix_ref || 'release' }}
+          - os: macos-latest
+            trix: ${{ inputs.trix_ref != '' && inputs.trix_ref || 'release' }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -48,19 +54,27 @@ jobs:
             trix-src -> target
 
       # Screenshots need a monospace font; DejaVu Sans Mono is the first
-      # Linux one render.rs looks for.
+      # Linux one render.rs looks for. macOS has Menlo.
       - name: Install fonts
+        if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q fonts-dejavu-core
 
       - name: Get trix (latest release)
         if: matrix.trix == 'release'
         run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64)   target=x86_64-unknown-linux-gnu ;;
+            Linux-ARM64) target=aarch64-unknown-linux-gnu ;;
+            macOS-ARM64) target=aarch64-apple-darwin ;;
+            macOS-X64)   target=x86_64-apple-darwin ;;
+            *) echo "::error::no trix release for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/trix"
-          gh release download --repo leofle/trix --pattern 'trix-x86_64-unknown-linux-gnu.tar.gz*' --dir "$RUNNER_TEMP/trix"
+          gh release download --repo leofle/trix --pattern "trix-$target.tar.gz*" --dir "$RUNNER_TEMP/trix"
           cd "$RUNNER_TEMP/trix"
-          sha256sum -c trix-x86_64-unknown-linux-gnu.tar.gz.sha256
-          tar -xzf trix-x86_64-unknown-linux-gnu.tar.gz
-          echo "TRIX_PROBE_TRIX=$RUNNER_TEMP/trix/trix-x86_64-unknown-linux-gnu/trix" >> "$GITHUB_ENV"
+          shasum -a 256 -c "trix-$target.tar.gz.sha256"
+          tar -xzf "trix-$target.tar.gz"
+          echo "TRIX_PROBE_TRIX=$RUNNER_TEMP/trix/trix-$target/trix" >> "$GITHUB_ENV"
 
       - name: Check out trix (${{ matrix.trix }})
         if: matrix.trix != 'release'
@@ -93,5 +107,5 @@ jobs:
         run: cargo test --locked -- --test-threads=1
 
       - name: Clippy
-        if: matrix.trix == 'release'
+        if: matrix.trix == 'release' && runner.os == 'Linux'
         run: cargo clippy --all-targets --locked -- -D warnings
