@@ -454,11 +454,11 @@ impl Snapshot {
         if needle.is_empty() {
             return hits;
         }
-        for r in 0..self.rows {
+        for (r, row) in self.cells.iter().enumerate().take(self.rows) {
             // Map each char of the row text to its column.
             let mut text = String::new();
             let mut col_of = Vec::new();
-            for (c, cell) in self.cells[r].iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
                 if cell.spacer {
                     continue;
                 }
