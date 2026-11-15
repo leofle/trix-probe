@@ -146,6 +146,18 @@ pub fn definitions() -> Vec<Value> {
             }},
         }),
         json!({
+            "name": "expect",
+            "description": "Check that text (or a regex) is on screen, or with absent: true that it isn't, giving the screen up to timeout_ms to get there. A failed check fails the step and shows the screen, so a replay of the repro fails: use it to turn a bug into a regression test (e.g. after the steps that showed it, expect what should be there).",
+            "input_schema": {"type": "object", "properties": {
+                "text": {"type": "string"}, "regex": {"type": "string"},
+                "absent": {"type": "boolean", "description": "Check that it's NOT on screen (default false)."},
+                "row": {"type": "integer", "description": "Look only at this row (from 0, as the text screen numbers them)."},
+                "timeout_ms": {"type": "integer", "description": "How long the screen may take to get there (default 3000, at most 120000)."},
+                "why": {"type": "string", "description": "What this checks, shown with the result, e.g. \"pane titles keep the name\"."},
+                "terminal": term(), "screenshot": shot(),
+            }},
+        }),
+        json!({
             "name": "sleep",
             "description": "Do nothing for a while (time passing matters: timers, 'time in state', the clock, animations), then look.",
             "input_schema": {"type": "object", "properties": {"ms": {"type": "integer"}, "terminal": term(), "screenshot": shot()}, "required": ["ms"]},
@@ -255,6 +267,7 @@ pub fn call(p: &mut Probe, name: &str, args: &Value) -> ToolOut {
         "compare" => crate::compare::compare(p, &args),
         "set_focus" => p.set_focus(&args),
         "wait_for" => p.wait_for(&args),
+        "expect" => p.expect(&args),
         "sleep" => p.sleep(&args),
         "find_text" => p.find_text(&args),
         "open_terminal" => p.open_terminal(&args),

@@ -1,0 +1,15 @@
+{
+  "title": "Grid pane titles keep the agent's name, and the sidebar steps aside, in narrow windows",
+  "notes": "trix 1.0.4 dropped the name from every pane title at 80x24 (each read '⚲ ○   main +5 −1') and kept a 37-column sidebar, leaving 21-column panes. Fixed in leofle/trix#42.",
+  "actions": [
+    {"tool": "launch", "args": {"args": ["claude", "claude", "codex", "shell"], "cols": 80, "rows": 24}},
+    {"tool": "wait_for", "args": {"text": "4 idle", "timeout_ms": 15000}},
+    {"tool": "press", "args": {"keys": ["alt+g"]}},
+    {"tool": "expect", "args": {"row": 1, "regex": "○ claude .*○ claude-2 ", "why": "top pane titles name their agents at 80x24"}},
+    {"tool": "expect", "args": {"row": 12, "regex": "○ codex .*○ shell ", "why": "bottom pane titles name their agents at 80x24"}},
+    {"tool": "expect", "args": {"text": "AGENTS", "absent": true, "why": "the sidebar steps aside so 2x2 panes keep 30+ columns"}},
+    {"tool": "resize", "args": {"cols": 60, "rows": 12}},
+    {"tool": "expect", "args": {"row": 1, "regex": "○ claude .*○ claude-2", "why": "names survive at 60x12, cut last"}},
+    {"tool": "expect", "args": {"row": 6, "regex": "○ codex .*○ shell", "why": "names survive at 60x12, cut last"}}
+  ]
+}
