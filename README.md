@@ -59,6 +59,8 @@ Each call returns the screen: whole at first, after a resize and every eighth lo
 
 `resize_while_open: true` opens each case once and resizes it through the sizes instead.
 
+Every screen is checked for layout problems a person sees at a glance: text drawn over a box's border (trix sets its own labels in a border apart with spaces, so text right against the line was drawn over it: `╰──› hello all───╯`), and a dialog drawing outside its box (text that changed outside it when it opened; the bottom bar, which shows the dialog's keys, aside). The result lists them per screen and sums them up; `check_layout: true` makes the sweep fail when there are any, for regressions. Other tools flag text over a border too, when it appears or goes away.
+
 `compare` runs the same steps on two binaries, one after the other in matching sandboxes, and shows the lines that differ, step by step and, inside a sweep, screen by screen. It masks the clock, durations, spinners, sparklines and the fake agents' ids, so only real differences show. Before/after images of each differing screen are saved. With no `steps`, it replays what your session has done since its launch:
 
 > Compare the Homebrew trix with my build on what we just did.

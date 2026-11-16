@@ -54,6 +54,11 @@ pub fn mask(line: &str, masks: &[(Regex, Mask)]) -> String {
     s
 }
 
+/// A line with the default masks applied.
+pub fn masked(line: &str) -> String {
+    mask(line, &DEFAULT)
+}
+
 /// Each row of the screen with the default masks applied.
 pub fn rows(s: &Snapshot) -> Vec<String> {
     (0..s.rows).map(|r| mask(&s.row_text(r), &DEFAULT)).collect()
