@@ -267,18 +267,57 @@ impl Terminal {
         self.shared.start.elapsed().saturating_sub(Duration::from_millis(last))
     }
 
+    /// Wait until the program writes nothing for `quiet`, or `max` passes:
+    /// stricter than `settle`, spinners included. `launch` uses it so its
+    /// first screen shows the agents ready, not starting up.
+    pub fn settle_output(&self, quiet: Duration, max: Duration) {
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(40));
+        while start.elapsed() < max && self.quiet_for() < quiet {
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
     /// Wait until the screen stops changing for `quiet`, or `max` passes.
-    /// Spinners and clocks never go quiet, hence the cap.
+    /// Settled means the program wrote nothing for `quiet`, or what it wrote
+    /// left the screen the same apart from what changes by itself (the clock,
+    /// durations, spinners, sparklines: see `mask`). Without the second, a
+    /// working agent's spinner kept every action waiting out `max`.
     pub fn settle(&self, quiet: Duration, max: Duration) {
         let start = Instant::now();
         // Give the program a moment to react before we judge quiet.
         std::thread::sleep(Duration::from_millis(40));
+        let mut last = self.fingerprint();
+        let mut same_since = Instant::now();
         while start.elapsed() < max {
-            if self.quiet_for() >= quiet {
+            if self.quiet_for() >= quiet || same_since.elapsed() >= quiet {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(15));
+            std::thread::sleep(Duration::from_millis(20));
+            let now = self.fingerprint();
+            if now != last {
+                last = now;
+                same_since = Instant::now();
+            }
         }
+    }
+
+    /// The screen as `settle` sees it, hashed: see `mask::fingerprint`.
+    pub fn fingerprint(&self) -> u64 {
+        crate::mask::fingerprint(&self.snapshot())
+    }
+
+    /// Wait until the screen differs from `from` (a `fingerprint`), the clock
+    /// and spinners aside, or `max` passes. Whether it changed.
+    pub fn wait_change(&self, from: u64, max: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.fingerprint() != from {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
     }
 
     pub fn signal(&self, sig: i32) {
@@ -421,16 +460,36 @@ impl Snapshot {
         s.trim_end().to_string()
     }
 
+    /// A hash of one row's colors and styles, to tell when only they changed.
+    pub fn row_style(&self, r: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for c in &self.cells[r] {
+            (c.fg.r, c.fg.g, c.fg.b, c.bg.r, c.bg.g, c.bg.b, c.bold, c.underline, c.strike).hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// The screen for a model to read: a column ruler, then each row with
-    /// its number. Rows and columns start at 0, as `click` takes them.
+    /// its number. Rows and columns start at 0, as `click` takes them. Runs
+    /// of identical rows (empty pane borders, mostly) are folded into one line.
     pub fn to_text(&self) -> String {
-        let mut out = String::new();
+        let all: Vec<usize> = (0..self.rows).collect();
+        format!("{}\n{}\n{}", self.header(), self.ruler(), self.rows_text(&all))
+    }
+
+    /// Size, cursor and title, in brackets.
+    pub fn header(&self) -> String {
         let cur = if self.cursor_visible {
             format!("cursor row {} col {}", self.cursor.0, self.cursor.1)
         } else {
             "cursor hidden".to_string()
         };
-        out.push_str(&format!("[{}x{} · {} · title: {}]\n", self.cols, self.rows, cur, self.title.as_deref().map_or("(none)".into(), |t| format!("{t:?}"))));
+        format!("[{}x{} · {} · title: {}]", self.cols, self.rows, cur, self.title.as_deref().map_or("(none)".into(), |t| format!("{t:?}")))
+    }
+
+    /// Column numbers every 10, lined up with the rows.
+    pub fn ruler(&self) -> String {
         let mut ruler = String::from("    ");
         let mut c = 0;
         while c < self.cols {
@@ -440,10 +499,28 @@ impl Snapshot {
             ruler.push_str(&" ".repeat(pad.min(self.cols.saturating_sub(c + label.len()))));
             c += 10;
         }
-        out.push_str(ruler.trim_end());
-        out.push('\n');
-        for r in 0..self.rows {
-            out.push_str(&format!("{r:>3}│{}\n", self.row_text(r)));
+        ruler.trim_end().to_string()
+    }
+
+    /// These rows (in order), numbered. Three or more consecutive rows with
+    /// the same text show as the first and a line saying how far it repeats.
+    pub fn rows_text(&self, rows: &[usize]) -> String {
+        let mut out = String::new();
+        let mut i = 0;
+        while i < rows.len() {
+            let r = rows[i];
+            let text = self.row_text(r);
+            let mut j = i + 1;
+            while j < rows.len() && rows[j] == rows[j - 1] + 1 && self.row_text(rows[j]) == text {
+                j += 1;
+            }
+            out.push_str(&format!("{r:>3}│{text}\n"));
+            match j - i {
+                1 => {}
+                2 => out.push_str(&format!("{:>3}│{text}\n", rows[i + 1])),
+                _ => out.push_str(&format!("  ⋮ rows {}–{} {}\n", rows[i + 1], rows[j - 1], if text.is_empty() { "are blank too".to_string() } else { format!("are the same as row {r}") })),
+            }
+            i = j;
         }
         out
     }

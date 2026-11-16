@@ -8,6 +8,7 @@
 //! comparing, keeping each line's width.
 
 use crate::probe::{Probe, Shot, ToolOut, clip, resolve_trix, version_of};
+use crate::mask::{Mask, default_masks, mask};
 use crate::term::Snapshot;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -17,43 +18,6 @@ use serde_json::{Value, json};
 struct Seen {
     notes: Vec<String>,
     frames: Vec<(String, Snapshot)>,
-}
-
-enum Mask {
-    /// Digits become '#'.
-    Digits,
-    /// Every character becomes '#'.
-    All,
-    /// Every character becomes this one.
-    Char(char),
-}
-
-fn default_masks() -> Vec<(Regex, Mask)> {
-    let re = |s: &str| Regex::new(s).unwrap();
-    vec![
-        (re(r"\b\d{1,2}:\d{2}(:\d{2})?\b"), Mask::Digits),
-        (re(r"\b\d+(\.\d+)?(ms|s|m|h|d)\b"), Mask::Digits),
-        (re(r"(session|pid) \[?[0-9a-f]+\]?"), Mask::All),
-        (re(r"[\x{2800}-\x{28FF}]"), Mask::Char('⠿')),
-        (re(r"[\x{2581}-\x{2588}]"), Mask::Char('▁')),
-    ]
-}
-
-fn mask(line: &str, masks: &[(Regex, Mask)]) -> String {
-    let mut s = line.to_string();
-    for (re, how) in masks {
-        s = re
-            .replace_all(&s, |c: &regex::Captures| {
-                let m = &c[0];
-                match how {
-                    Mask::Digits => m.chars().map(|ch| if ch.is_ascii_digit() { '#' } else { ch }).collect::<String>(),
-                    Mask::All => "#".repeat(m.chars().count()),
-                    Mask::Char(x) => x.to_string().repeat(m.chars().count()),
-                }
-            })
-            .into_owned();
-    }
-    s
 }
 
 /// The screen as lines to compare: a line for size, cursor and title, then the rows.
@@ -245,7 +209,7 @@ pub fn compare(p: &mut Probe, a: &Value) -> Result<ToolOut> {
 }
 
 /// 1, 2, 3, 5 → "1–3, 5".
-fn ranges(v: &[usize]) -> String {
+pub fn ranges(v: &[usize]) -> String {
     let mut parts = Vec::new();
     let mut i = 0;
     while i < v.len() {
