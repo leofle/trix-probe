@@ -1064,7 +1064,8 @@ impl Probe {
         let content = a.get("content").and_then(Value::as_str).context("content is required")?;
         let path = self.sb()?.resolve(p)?;
         let config = self.sb()?.is_trix_config(&path);
-        let before = self.term(None).map(Terminal::fingerprint).ok();
+        // The reload messages already on screen, so an old one doesn't count.
+        let before = self.term(None).map(|t| reload_toasts(&t.snapshot())).ok();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -1073,15 +1074,23 @@ impl Probe {
         } else {
             std::fs::write(&path, content)?;
         }
-        // trix looks at its config about once a second, and says what it made
-        // of a change (a toast, a new theme): wait for the screen to show it.
+        // trix looks at its config about once a second and says what it made
+        // of a change in a toast: wait for a new one. Anything else that
+        // changes on screen meanwhile (an agent finishing) isn't it.
         let mut note = String::new();
-        if config && let (Some(f), Ok(t)) = (before, self.term(None)) {
+        if config && let (Some(before), Ok(t)) = (before, self.term(None)) {
             let start = Instant::now();
-            note = if t.wait_change(f, Duration::from_millis(2500)) {
-                format!("; the screen changed {:.1}s later", start.elapsed().as_secs_f32())
-            } else {
-                "; the screen didn't change within 2.5 s (did trix reload it?)".into()
+            let mut said = None;
+            while said.is_none() && start.elapsed() < Duration::from_millis(2500) {
+                said = reload_toasts(&t.snapshot()).into_iter().find(|x| !before.contains(x)).map(|(_, toast)| toast);
+                if said.is_none() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            note = match said {
+                Some(toast) => format!("; trix said {toast:?} {:.1}s later", start.elapsed().as_secs_f32()),
+                None if !before.is_empty() => "; trix showed no new reload message within 2.5 s (the one from before was still up, and a repeat of it looks the same)".into(),
+                None => "; trix showed no reload message within 2.5 s (it shows none when the settings come out the same)".into(),
             };
         }
         let mut out = self.after(&json!({"wait_ms": 500, "screenshot": a.get("screenshot")}), Shot::Text)?;
@@ -1240,6 +1249,19 @@ impl Drop for Probe {
     fn drop(&mut self) {
         self.teardown();
     }
+}
+
+/// trix's toasts after it reloads config.toml, as (row, toast text): "✓
+/// config reloaded", "✓ config OK again", "✕ config: <error> — kept the
+/// previous settings".
+fn reload_toasts(s: &Snapshot) -> Vec<(usize, String)> {
+    static TOAST: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"[✓✕] config( reloaded| OK again|:)").unwrap());
+    (0..s.rows)
+        .filter_map(|r| {
+            let row = s.row_text(r);
+            TOAST.find(&row).map(|m| (r, row[m.start()..].trim().to_string()))
+        })
+        .collect()
 }
 
 fn issue_markdown(i: &Value) -> String {

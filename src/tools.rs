@@ -213,7 +213,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "write_file",
-            "description": "Write (or append to) a file inside the sandbox, e.g. edit xdg/config/trix/config.toml to test live reload and config errors, or create folders for agents. For one of trix's config files it waits for the screen to show the reload (up to 2.5 s). Returns the screen afterwards.",
+            "description": "Write (or append to) a file inside the sandbox, e.g. edit xdg/config/trix/config.toml to test live reload and config errors, or create folders for agents. For trix's config.toml it waits for trix's reload message (\"config reloaded\" or the error, up to 2.5 s) and says what it was. Returns the screen afterwards.",
             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "append": {"type": "boolean"}}, "required": ["path", "content"]},
         }),
         json!({
