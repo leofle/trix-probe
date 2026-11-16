@@ -10,7 +10,7 @@
 //! A fix that isn't in a trix release yet gets "fixed_in": the first release
 //! with it (e.g. "1.0.8"). Such a file is skipped against an older trix, so
 //! testing the latest release stays green, unless TRIX_PROBE_UNRELEASED=1:
-//! set that for a build from source (master, a branch), which still reports
+//! set that for a build from source (main, a branch), which still reports
 //! the last release's version but has the fix.
 
 use std::path::PathBuf;

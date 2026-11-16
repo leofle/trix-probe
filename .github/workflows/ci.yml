@@ -2,7 +2,7 @@ name: CI
 
 # Builds trix-probe and runs its tests, including the end-to-end test and
 # the regression suite (tests/regressions/*.json), against two trix builds:
-# the latest release and trix's master, built from source. The daily run
+# the latest release and trix's main, built from source. The daily run
 # catches a regression that lands in trix itself, not only here.
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        trix: [release, master]
+        trix: [release, main]
         # A manual run with a trix ref tests that too, on both systems.
         # Otherwise these merge into the release jobs and add nothing.
         include:
