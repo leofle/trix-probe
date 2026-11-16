@@ -103,7 +103,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "sweep",
-            "description": "Look at each case at each size, in this session, in one call: for every case and size it resizes, presses the case's keys (and types its text), looks, then presses reset (default esc) to close it again. Returns every screen as text (or contact-sheet PNGs, one per case) and saves the sheets. Use it for layout at many sizes, e.g. every dialog from 24 rows down to 5. Inside compare, each of its screens is compared on its own.",
+            "description": "Look at each case at each size, in this session, in one call: for every case and size it resizes, presses the case's keys (and types its text), looks, then presses reset (default esc) to close it again. Returns every screen as text (or contact-sheet PNGs, one per case) and saves the sheets. Use it for layout at many sizes, e.g. every dialog from 24 rows down to 5. Each screen is checked for text drawn over a border, and for a dialog drawing outside its box (text that changed outside it when it opened); the result says which screens have problems. Inside compare, each of its screens is compared on its own.",
             "input_schema": {"type": "object", "properties": {
                 "sizes": {"type": "array", "items": {"type": "string"}, "description": "Sizes as COLSxROWS, e.g. [\"80x24\", \"80x9\", \"80x6\", \"50x12\"]."},
                 "cases": {"type": "array", "description": "What to open at each size. Leave out to look at the screen as it is.", "items": {"type": "object", "properties": {
@@ -112,6 +112,7 @@ pub fn definitions() -> Vec<Value> {
                     "text": {"type": "string", "description": "Text to type after the keys, e.g. a message to see it in place."},
                     "reset": {"type": "array", "items": {"type": "string"}, "description": "Keys that close it again (default [\"esc\"]; [] for none)."},
                 }}},
+                "check_layout": {"type": "boolean", "description": "Fail (an error result) when any screen has a layout problem, for regressions (default false: only report them)."},
                 "resize_while_open": {"type": "boolean", "description": "Open each case once at the first size, then resize it through the rest (default false: open it fresh at each size). Resizing an open dialog finds different bugs."},
                 "wait_ms": {"type": "integer", "description": "How long each screen may take to settle (default 800; it moves on once the screen is still for 250 ms)."},
                 "terminal": term(), "screenshot": shot(),

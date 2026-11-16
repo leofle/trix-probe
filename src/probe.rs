@@ -164,6 +164,8 @@ pub struct Probe {
     /// The screen of each terminal as the model last saw it, to send only
     /// what changed.
     looked: BTreeMap<String, Looked>,
+    /// The layout problems last told for each terminal, to tell only news.
+    layout_said: BTreeMap<String, Vec<String>>,
 }
 
 /// A screen the model has seen.
@@ -200,6 +202,7 @@ impl Probe {
             offsets: BTreeMap::new(),
             shots: 0,
             looked: BTreeMap::new(),
+            layout_said: BTreeMap::new(),
         }
     }
 
@@ -223,6 +226,7 @@ impl Probe {
         self.events = None;
         self.terms.clear();
         self.looked.clear();
+        self.layout_said.clear();
         if let Some(sb) = self.sb.take() {
             sb.teardown();
             crate::cleanup::forget(&sb.root);
@@ -308,6 +312,7 @@ impl Probe {
         let t = Terminal::spawn(&sb.trix, args, &cwd, &sb.env, size, self.palette.clone(), self.keyboard)?;
         self.terms.insert(name.to_string(), t);
         self.looked.remove(name);
+        self.layout_said.remove(name);
         Ok(())
     }
 
@@ -340,6 +345,7 @@ impl Probe {
         let exited = t.exited();
         self.terms.remove(&name);
         self.looked.remove(&name);
+        self.layout_said.remove(&name);
         Ok(ToolOut::text(format!(
             "closed terminal '{name}' ({}){}.{}",
             if how == "kill" { "SIGKILL, like a crashed terminal" } else { "SIGHUP, like closing the window" },
@@ -668,6 +674,8 @@ impl Probe {
         let start_size = self.term(name)?.size();
 
         let mut groups: Vec<Vec<(String, Snapshot)>> = Vec::new();
+        // Layout problems of each screen, in the order of groups' screens.
+        let mut layout: Vec<Vec<String>> = Vec::new();
         for case in &cases {
             let mut tiles = Vec::new();
             if open_once {
@@ -680,10 +688,21 @@ impl Probe {
                 let t = self.term(name)?;
                 t.resize(c, r);
                 t.settle(Duration::from_millis(250), wait);
+                // The screen before the case opens, to see what it drew outside its box.
+                let opens = !case.keys.is_empty() || case.text.is_some();
+                let base = (opens && !open_once).then(|| t.snapshot());
                 if !open_once {
                     self.open_case(name, case, wait)?;
                 }
-                tiles.push((format!("{} @ {c}x{r}", case.name), self.term(name)?.snapshot()));
+                let snap = self.term(name)?.snapshot();
+                let mut found = crate::layout::over_borders(&snap);
+                if let Some(b) = &base {
+                    // A row already flagged for text over a border needs no second line.
+                    let rows: Vec<Option<usize>> = found.iter().map(|p| crate::layout::row_of(p)).collect();
+                    found.extend(crate::layout::outside_dialog(b, &snap).into_iter().filter(|p| !rows.contains(&crate::layout::row_of(p))));
+                }
+                layout.push(found);
+                tiles.push((format!("{} @ {c}x{r}", case.name), snap));
                 if !open_once {
                     self.close_case(name, case, wait)?;
                 }
@@ -724,13 +743,22 @@ impl Probe {
             start_size.1,
             dir.display()
         );
-        for (label, snap) in groups.iter().flatten() {
+        let bad: Vec<&str> = groups.iter().flatten().zip(&layout).filter(|(_, f)| !f.is_empty()).map(|((l, _), _)| l.as_str()).collect();
+        if bad.is_empty() {
+            text += "Layout: no text drawn over a border or outside a dialog.\n";
+        } else {
+            text += &format!("Layout: ⚠ problems on {} of {n} screens: {}.\n", bad.len(), bad.join(", "));
+        }
+        for ((label, snap), found) in groups.iter().flatten().zip(&layout) {
+            let warn: String = found.iter().map(|p| format!("⚠ layout: {p}\n")).collect();
             match shot {
-                Shot::Text | Shot::Full | Shot::Both => text += &format!("\n── {label}\n{}", snap.to_text()),
-                Shot::Png => text += &format!("── {label}: in the images\n"),
+                Shot::Text | Shot::Full | Shot::Both => text += &format!("\n── {label}\n{}{warn}", snap.to_text()),
+                Shot::Png => text += &format!("── {label}: in the images\n{warn}"),
+                Shot::None if !found.is_empty() => text += &format!("── {label}\n{warn}"),
                 Shot::None => {}
             }
         }
+        out.is_error = a.get("check_layout").and_then(Value::as_bool).unwrap_or(false) && !bad.is_empty();
         text += &self.changes();
         out.text = text;
         out.frames = groups.into_iter().flatten().collect();
@@ -774,6 +802,7 @@ impl Probe {
             }
             Shot::None => {}
         }
+        text += &self.layout_note(label, &snap);
         if matches!(shot, Shot::Png | Shot::Both) {
             match crate::render::png(&snap, self.cfg.font_px) {
                 Ok(png) => out.images.push(png),
@@ -783,6 +812,22 @@ impl Probe {
         let changes = self.changes();
         out.text = format!("{text}{changes}");
         Ok(out)
+    }
+
+    /// Text drawn over a border (see `layout::over_borders`), told when it
+    /// changed since the last look at this terminal: new, or gone.
+    fn layout_note(&mut self, label: &str, snap: &Snapshot) -> String {
+        let now = crate::layout::over_borders(snap);
+        let masked = |v: &[String]| v.iter().map(|p| crate::mask::masked(p)).collect::<Vec<_>>();
+        let before = self.layout_said.get(label).cloned().unwrap_or_default();
+        if masked(&now) == masked(&before) {
+            return String::new();
+        }
+        self.layout_said.insert(label.to_string(), now.clone());
+        if now.is_empty() {
+            return "✓ layout: the text drawn over borders before is gone\n".into();
+        }
+        now.iter().map(|p| format!("⚠ layout: {p}\n")).collect()
     }
 
     /// The screen as text for the model, and a note that it has seen it.
