@@ -6,7 +6,7 @@ trix-probe runs trix in a virtual terminal inside a throwaway sandbox. It turns 
 
 It works two ways:
 
-- **As an MCP server.** Claude Code (or any MCP client) gets 25 tools (`launch`, `press`, `type_text`, `click`, `resize`, `batch`, `sweep`, `compare`, `fake_agent`, `report_issue`, …) and you steer the testing yourself.
+- **As an MCP server.** Claude Code (or any MCP client) gets 26 tools (`launch`, `press`, `type_text`, `click`, `resize`, `batch`, `sweep`, `compare`, `fake_agent`, `expect`, `report_issue`, …) and you steer the testing yourself.
 - **On its own.** `trix-probe explore` hands the tools to Claude through the API. Claude explores trix, checks it against the docs and writes a report. Each issue comes with a screenshot and a replayable repro.
 
 ```
@@ -113,6 +113,12 @@ trix-probe replay ~/.local/share/trix-probe/runs/…/issues/001-…/repro.json -
 
 It prints each step and the final screen, and saves a PNG of it. The binary you give wins over one a recorded `launch` names. `--recorded-trix` runs the recorded ones instead.
 
+`replay` exits 1 if any step fails: an action errors, a `wait_for` times out, or an `expect` doesn't hold. `expect` checks the screen, or one row of it, for text or a regex (`absent: true` checks it isn't there), and shows the screen when it fails. Add `expect` steps to a repro and it becomes a regression test:
+
+```json
+{"tool": "expect", "args": {"row": 1, "regex": "○ claude .*○ claude-2 ", "why": "pane titles keep the name at 80x24"}}
+```
+
 The same comparison from the command line, on a repro or any file of that shape:
 
 ```sh
@@ -170,8 +176,13 @@ The probe clears `TRIX_*`, `TMUX`, terminal-identity and Claude Code variables f
 ## Development
 
 ```sh
-cargo test        # unit tests, plus an end-to-end needs-you round trip against the trix on PATH (skipped without one)
+cargo test        # unit tests, an end-to-end needs-you round trip, and the regression suite, against the trix on PATH (skipped without one)
+TRIX_PROBE_TRIX=~/Projects/trix/target/release/trix cargo test --test regressions    # the regressions against a build
 ```
+
+The regression suite replays every `tests/regressions/*.json` (`{"title", "notes", "actions"}`, the shape of a repro) one at a time and fails if any step fails. `TRIX_PROBE_ONLY=grid` runs just the files whose names contain `grid`. To add one, reproduce the bug with trix-probe, add `expect` steps for what should be on screen, and check it fails on a build with the bug and passes on one without.
+
+When the fix isn't in a trix release yet, give the file `"fixed_in": "1.0.8"` (the first release with it). It's skipped against older trix, so testing the latest release stays green. A build from source still reports the last release's version, so set `TRIX_PROBE_UNRELEASED=1` to run those files against `master` or a branch; CI does this for its source builds.
 
 ```
 src/main.rs     CLI: mcp, explore, replay, compare, try, doctor (+ the internal fake-agent and log-cmd)

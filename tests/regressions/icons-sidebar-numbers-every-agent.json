@@ -1,0 +1,175 @@
+{
+ "title": "The icons sidebar numbers every agent, including 10 and up, aligned",
+ "fixed_in": "1.0.8",
+ "notes": "trix 1.0.7 (PR #45) drew numbers only for agents 1-9, so in the icons rail (no names) agents 10+ were bare state icons and couldn't be told apart. Fixed in leofle/trix#47.",
+ "actions": [
+  {
+   "tool": "launch",
+   "args": {
+    "args": [
+     "claude",
+     "shell"
+    ],
+    "cols": 120,
+    "rows": 20
+   }
+  },
+  {
+   "tool": "wait_for",
+   "args": {
+    "text": "2 idle",
+    "timeout_ms": 15000
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "shell"
+    ]
+   }
+  },
+  {
+   "tool": "run_trix",
+   "args": {
+    "args": [
+     "spawn",
+     "claude",
+     "--name",
+     "late",
+     "--prompt",
+     "permission"
+    ]
+   }
+  },
+  {
+   "tool": "wait_for",
+   "args": {
+    "text": "1 needs you",
+    "timeout_ms": 15000
+   }
+  },
+  {
+   "tool": "press",
+   "args": {
+    "keys": [
+     "alt+m",
+     "alt+m"
+    ]
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "text": "AGENTS",
+    "absent": true,
+    "why": "two alt+m presses reach the icons rail"
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 12,
+    "regex": "^ {3}9 ○",
+    "why": "agent 9, right-aligned with the two-digit numbers"
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 13,
+    "regex": "^ {2}10 ○",
+    "why": "agent 10 has its number"
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 14,
+    "regex": "^ {2}11 ○",
+    "why": "agent 11 has its number"
+   }
+  },
+  {
+   "tool": "expect",
+   "args": {
+    "row": 15,
+    "regex": "^ ▌12 ▲",
+    "why": "agent 12, which needs you, has its number and the red bar"
+   }
+  }
+ ]
+}

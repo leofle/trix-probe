@@ -1,0 +1,114 @@
+name: CI
+
+# Builds trix-probe and runs its tests, including the end-to-end test and
+# the regression suite (tests/regressions/*.json), against two trix builds:
+# the latest release and trix's master, built from source. The daily run
+# catches a regression that lands in trix itself, not only here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      trix_ref:
+        description: A trix branch, tag or commit to test as well (built from source)
+        required: false
+        default: ""
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, trix ${{ matrix.trix }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        trix: [release, master]
+        # A manual run with a trix ref tests that too, on both systems.
+        # Otherwise these merge into the release jobs and add nothing.
+        include:
+          - os: ubuntu-latest
+            trix: ${{ inputs.trix_ref != '' && inputs.trix_ref || 'release' }}
+          - os: macos-latest
+            trix: ${{ inputs.trix_ref != '' && inputs.trix_ref || 'release' }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            trix-src -> target
+
+      # Screenshots need a monospace font; DejaVu Sans Mono is the first
+      # Linux one render.rs looks for. macOS has Menlo.
+      - name: Install fonts
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q fonts-dejavu-core
+
+      - name: Get trix (latest release)
+        if: matrix.trix == 'release'
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64)   target=x86_64-unknown-linux-gnu ;;
+            Linux-ARM64) target=aarch64-unknown-linux-gnu ;;
+            macOS-ARM64) target=aarch64-apple-darwin ;;
+            macOS-X64)   target=x86_64-apple-darwin ;;
+            *) echo "::error::no trix release for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/trix"
+          gh release download --repo leofle/trix --pattern "trix-$target.tar.gz*" --dir "$RUNNER_TEMP/trix"
+          cd "$RUNNER_TEMP/trix"
+          shasum -a 256 -c "trix-$target.tar.gz.sha256"
+          tar -xzf "trix-$target.tar.gz"
+          echo "TRIX_PROBE_TRIX=$RUNNER_TEMP/trix/trix-$target/trix" >> "$GITHUB_ENV"
+
+      - name: Check out trix (${{ matrix.trix }})
+        if: matrix.trix != 'release'
+        uses: actions/checkout@v4
+        with:
+          repository: leofle/trix
+          ref: ${{ matrix.trix }}
+          path: trix-src
+
+      # A build from source still reports the last release's version, so
+      # TRIX_PROBE_UNRELEASED runs the regressions marked fixed_in a later one.
+      - name: Build trix (${{ matrix.trix }})
+        if: matrix.trix != 'release'
+        run: |
+          cargo build --release --locked --manifest-path trix-src/Cargo.toml
+          echo "TRIX_PROBE_TRIX=$GITHUB_WORKSPACE/trix-src/target/release/trix" >> "$GITHUB_ENV"
+          echo "TRIX_PROBE_UNRELEASED=1" >> "$GITHUB_ENV"
+
+      - name: Build trix-probe
+        run: cargo build --locked
+
+      - name: Doctor
+        run: |
+          "$TRIX_PROBE_TRIX" --version
+          cargo run --locked -q -- doctor | tee "$RUNNER_TEMP/doctor.txt"
+          # doctor exits 0 either way; a FAIL line fails the job here.
+          ! grep -q '^FAIL' "$RUNNER_TEMP/doctor.txt"
+
+      # TRIX_PROBE_TRIX is set, so the e2e and regression tests run rather
+      # than skip. One test thread: each one starts its own trix, and timing
+      # matters.
+      - name: Test
+        run: cargo test --locked -- --test-threads=1
+
+      - name: Clippy
+        if: matrix.trix == 'release' && runner.os == 'Linux'
+        run: cargo clippy --all-targets --locked -- -D warnings

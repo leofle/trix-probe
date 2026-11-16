@@ -73,7 +73,8 @@ enum Cmd {
         #[arg(long)]
         no_fallbacks: bool,
     },
-    /// Run a repro.json from a report again and show where it ends up.
+    /// Run a repro.json from a report again and show where it ends up. Exits 1 if any step fails
+    /// (an action errors, a wait_for times out, an expect does not hold).
     Replay {
         repro: PathBuf,
         #[command(flatten)]
@@ -241,6 +242,7 @@ fn replay(repro: PathBuf, mut common: Common, recorded: bool) -> Result<()> {
     }
     let actions = v.get("actions").and_then(Value::as_array).cloned().unwrap_or_default();
     anyhow::ensure!(!actions.is_empty(), "no actions in {}", repro.display());
+    let mut failed = Vec::new();
     for (i, a) in actions.iter().enumerate() {
         let name = a["tool"].as_str().unwrap_or("");
         let mut args = a.get("args").cloned().unwrap_or(json!({}));
@@ -251,17 +253,37 @@ fn replay(repro: PathBuf, mut common: Common, recorded: bool) -> Result<()> {
         println!("── [{}/{}] {name} {}", i + 1, actions.len(), probe::clip(&args.to_string(), 200));
         let out = tools::call(&mut p, name, &args);
         let text = out.text.trim();
-        if !text.is_empty() {
+        if out.is_error {
+            println!("✗ step {} failed", i + 1);
+            failed.push(format!("{}: {name} — {}", i + 1, text.lines().next().unwrap_or("")));
+            // Show the failure in full: an expect's screen is the evidence.
+            if !text.is_empty() {
+                println!("{}", probe::clip(text, 6000));
+            }
+            if name == "launch" {
+                break; // nothing after it can run
+            }
+        } else if !text.is_empty() {
             println!("{}", probe::clip(text, 1500));
         }
     }
-    println!("── final screen");
-    let snap = p.snapshot(None)?;
-    println!("{}", snap.to_text());
-    let png = p.save_screenshot(None)?;
-    println!("saved {}", png.display());
+    if p.snapshot(None).is_ok() {
+        println!("── final screen");
+        println!("{}", p.snapshot(None)?.to_text());
+        let png = p.save_screenshot(None)?;
+        println!("saved {}", png.display());
+    }
     p.teardown();
-    Ok(())
+    if failed.is_empty() {
+        println!("── all {} steps passed", actions.len());
+        Ok(())
+    } else {
+        println!("── {} of {} steps failed:", failed.len(), actions.len());
+        for f in &failed {
+            println!("  {f}");
+        }
+        std::process::exit(1);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

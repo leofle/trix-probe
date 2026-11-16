@@ -59,6 +59,14 @@ impl Shot {
             _ => default,
         }
     }
+
+    /// The same, but always including the whole screen as text.
+    pub fn max_text(self) -> Shot {
+        match self {
+            Shot::None | Shot::Text | Shot::Full => Shot::Full,
+            Shot::Png | Shot::Both => Shot::Both,
+        }
+    }
 }
 
 /// What a tool hands back to the model.
@@ -501,18 +509,26 @@ impl Probe {
         Ok(out)
     }
 
-    pub fn wait_for(&mut self, a: &Value) -> Result<ToolOut> {
+    /// Poll the screen (or one row of it) until `text`/`regex` is there, or
+    /// with `gone` until it isn't, for at most `timeout`. Returns whether
+    /// that happened and how long it took, plus a label for what was sought.
+    fn poll_screen(&self, a: &Value, gone: bool, timeout: Duration) -> Result<(bool, Duration, String)> {
         let text = a.get("text").and_then(Value::as_str);
         let re = a.get("regex").and_then(Value::as_str).map(regex::Regex::new).transpose()?;
         anyhow::ensure!(text.is_some() || re.is_some(), "give text or regex");
-        let gone = a.get("gone").and_then(Value::as_bool).unwrap_or(false);
-        let timeout = Duration::from_millis(a.get("timeout_ms").and_then(Value::as_u64).unwrap_or(10_000).min(120_000));
+        let row = a.get("row").and_then(Value::as_u64).map(|r| r as usize);
         let name = a.get("terminal").and_then(Value::as_str);
         let start = Instant::now();
         let met = loop {
             let snap = self.term(name)?.snapshot();
-            let plain = snap.plain();
-            let present = text.is_some_and(|t| plain.contains(t)) || re.as_ref().is_some_and(|r| r.is_match(&plain));
+            let hay = match row {
+                Some(r) => {
+                    anyhow::ensure!(r < snap.rows, "row {r} is off the screen (it has {} rows)", snap.rows);
+                    snap.row_text(r)
+                }
+                None => snap.plain(),
+            };
+            let present = text.is_some_and(|t| hay.contains(t)) || re.as_ref().is_some_and(|r| r.is_match(&hay));
             if present != gone {
                 break true;
             }
@@ -521,14 +537,48 @@ impl Probe {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        let what = text.map(|t| format!("{t:?}")).or(a.get("regex").and_then(Value::as_str).map(|r| format!("/{r}/"))).unwrap_or_default();
+        let mut what = text.map(|t| format!("{t:?}")).or(a.get("regex").and_then(Value::as_str).map(|r| format!("/{r}/"))).unwrap_or_default();
+        if let Some(r) = row {
+            what += &format!(" on row {r}");
+        }
+        Ok((met, start.elapsed(), what))
+    }
+
+    pub fn wait_for(&mut self, a: &Value) -> Result<ToolOut> {
+        let gone = a.get("gone").and_then(Value::as_bool).unwrap_or(false);
+        let timeout = Duration::from_millis(a.get("timeout_ms").and_then(Value::as_u64).unwrap_or(10_000).min(120_000));
+        let (met, took, what) = self.poll_screen(a, gone, timeout)?;
         let head = if met {
-            format!("{what} {} after {:.1}s", if gone { "disappeared" } else { "appeared" }, start.elapsed().as_secs_f32())
+            format!("{what} {} after {:.1}s", if gone { "disappeared" } else { "appeared" }, took.as_secs_f32())
         } else {
             format!("timed out after {:.1}s: {what} {}", timeout.as_secs_f32(), if gone { "is still there" } else { "never appeared" })
         };
         let mut out = self.after(a, Shot::Text)?;
         out.text = format!("{head}\n{}", out.text);
+        // A wait that never ends the way it should fails the step, so a
+        // replay of it fails too.
+        out.is_error = !met;
+        Ok(out)
+    }
+
+    /// An assertion: text (or a regex) is on screen, or with absent: true
+    /// isn't. It gives the screen up to timeout_ms to get there, and fails
+    /// the step with the screen shown when it doesn't.
+    pub fn expect(&mut self, a: &Value) -> Result<ToolOut> {
+        let absent = a.get("absent").and_then(Value::as_bool).unwrap_or(false);
+        let timeout = Duration::from_millis(a.get("timeout_ms").and_then(Value::as_u64).unwrap_or(3_000).min(120_000));
+        let (met, _, what) = self.poll_screen(a, absent, timeout)?;
+        let why = a.get("why").and_then(Value::as_str).map(|w| format!(" ({w})")).unwrap_or_default();
+        if met {
+            let mut out = self.screen_out(a.get("terminal").and_then(Value::as_str), Shot::parse(a.get("screenshot"), Shot::None))?;
+            out.text = format!("✓ {what} {}{why}\n{}", if absent { "is absent" } else { "is on screen" }, out.text);
+            return Ok(out);
+        }
+        // Always show the whole screen on a failure: it's what the reader needs.
+        self.looked.remove(a.get("terminal").and_then(Value::as_str).unwrap_or("main"));
+        let mut out = self.screen_out(a.get("terminal").and_then(Value::as_str), Shot::parse(a.get("screenshot"), Shot::Text).max_text())?;
+        out.text = format!("✗ expected {what} {}{why}, after {:.1}s\n{}", if absent { "to be absent" } else { "on screen" }, timeout.as_secs_f32(), out.text);
+        out.is_error = true;
         Ok(out)
     }
 
