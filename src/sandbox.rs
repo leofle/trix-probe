@@ -235,14 +235,14 @@ impl Sandbox {
         self.runtime.join("trix/server.log")
     }
 
-    /// Resolve a path the tester gave: relative paths start at the sandbox
-    /// root, `~` is the sandbox HOME. Anything outside the sandbox is refused.
-    /// Whether `p` (from `resolve`) is one of trix's own config files, which
-    /// it reloads when they change.
+    /// Whether `p` (from `resolve`) is trix's config.toml, which it reloads
+    /// when it changes. (Its themes are built in, or Omarchy's.)
     pub fn is_trix_config(&self, p: &Path) -> bool {
-        p.starts_with(normalize(&self.root.join("xdg/config/trix")))
+        p == normalize(&self.root.join("xdg/config/trix/config.toml"))
     }
 
+    /// Resolve a path the tester gave: relative paths start at the sandbox
+    /// root, `~` is the sandbox HOME. Anything outside the sandbox is refused.
     pub fn resolve(&self, p: &str) -> Result<PathBuf> {
         let path = if let Some(rest) = p.strip_prefix("~/") {
             self.home.join(rest)
