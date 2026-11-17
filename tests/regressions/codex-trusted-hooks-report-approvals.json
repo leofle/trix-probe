@@ -1,0 +1,16 @@
+{
+  "title": "A Codex with trix's hooks trusted says what it asks to run, and finishes",
+  "notes": "Once Codex's /hooks trusted them, trix hears Codex's own lifecycle hooks: an exec_command approval names its command, and Stop ends the turn. Before the fake codex read trix's -c hooks, nothing exercised this path.",
+  "actions": [
+    {"tool": "launch", "args": {"args": ["codex", "shell"], "cols": 120, "rows": 30}},
+    {"tool": "wait_for", "args": {"text": "2 idle", "timeout_ms": 15000}},
+    {"tool": "fake_agent", "args": {"agent": "codex", "action": "turn", "text": "/hooks"}},
+    {"tool": "fake_agent", "args": {"agent": "codex", "action": "permission"}},
+    {"tool": "wait_for", "args": {"text": "approve exec_command rm -rf dist", "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"text": "1 needs you", "why": "the approval hook makes it need you"}},
+    {"tool": "fake_agent", "args": {"agent": "codex", "action": "answer", "key": "y"}},
+    {"tool": "wait_for", "args": {"text": "✓ 1 done", "timeout_ms": 10000}},
+    {"tool": "sleep", "args": {"ms": 3000}},
+    {"tool": "expect", "args": {"text": "✓ 1 done", "why": "a hooked Codex stays done once its turn ended"}}
+  ]
+}

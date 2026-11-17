@@ -1,0 +1,18 @@
+{
+  "title": "A Codex whose approval was answered stops needing you",
+  "notes": "The fake codex used to leave an answered approval on screen, in Claude's words, so trix, which reads an untrusted Codex's prompts off its screen, kept it on needs-you for good after the answer. A real Codex takes the dialog away once answered. This checks trix's Codex path without trusted hooks: needs-you from Codex's own approval wording, and not after the answer.",
+  "actions": [
+    {"tool": "launch", "args": {"args": ["codex", "shell"], "cols": 120, "rows": 30}},
+    {"tool": "wait_for", "args": {"text": "2 idle", "timeout_ms": 15000}},
+    {"tool": "press", "args": {"keys": ["alt+1"]}},
+    {"tool": "fake_agent", "args": {"agent": "codex", "action": "permission"}},
+    {"tool": "wait_for", "args": {"text": "1 needs you", "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"text": "Would you like to run the following command?", "why": "Codex asks in its own words"}},
+    {"tool": "press", "args": {"keys": ["y"]}},
+    {"tool": "wait_for", "args": {"text": "needs you", "gone": true, "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"text": "Would you like to run", "absent": true, "why": "the answered dialog is gone, as in Codex"}},
+    {"tool": "expect", "args": {"text": "You approved codex to run rm -rf dist this time", "why": "the answer is on record instead"}},
+    {"tool": "sleep", "args": {"ms": 3000}},
+    {"tool": "expect", "args": {"text": "needs you", "absent": true, "why": "and it doesn't come back once the screen settles"}}
+  ]
+}

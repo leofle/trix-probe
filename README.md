@@ -135,7 +135,7 @@ trix-probe try --keys alt+n -o form.png -- claude shell     # launch, press alt+
 
 ## The fake agents
 
-In the sandbox, `claude`, `codex`, `grok`, `opencode`, `cursor-agent`, `copilot` and `muse` are all `trix-probe fake-agent`. The fake claude reads the `--settings` overlay trix hands it and runs trix's own hook commands with Claude-shaped payloads (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`). It also writes a conversation log with token usage for the context gauge. The other kinds fire no hooks, so trix has to read their screens, as it does for agents without hooks.
+In the sandbox, `claude`, `codex`, `grok`, `opencode`, `cursor-agent`, `copilot` and `muse` are all `trix-probe fake-agent`. The fake claude reads the `--settings` overlay trix hands it and runs trix's own hook commands with Claude-shaped payloads (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`). It also writes a conversation log with token usage for the context gauge. The fake codex reads the `-c notify=…` and `-c hooks=…` trix hands Codex, and does what Codex does with them: it runs `notify` after every finished turn (`agent-turn-complete`, with the last reply), asks for approval in Codex's words, and runs the lifecycle hooks (Codex-shaped: `exec_command`, `apply_patch`, `Interrupt`) only once `/hooks` has trusted them, since Codex runs no hook you haven't trusted. The other kinds fire no hooks, so trix has to read their screens, as it does for agents without hooks. Every fake takes an answered dialog off the screen, as Claude Code and Codex do.
 
 Type a prompt into a fake agent's pane. Words in it decide the turn:
 
@@ -150,6 +150,7 @@ Type a prompt into a fake agent's pane. Words in it decide the turn:
 | `context 85` | sets the context gauge to 85% |
 | `title <text>`, `bell` | sets the terminal title, rings the bell |
 | `crash`, `exit` | exits with code 1, or cleanly |
+| `/hooks` | (codex) trusts trix's hooks, as Codex's `/hooks` screen does: they run from then on |
 | anything else | a short turn: Read, Grep, Edit (a real one-line edit in the demo repo), Bash |
 
 Esc interrupts a turn. Ctrl-C twice exits. The `fake_agent` tool does all of this from outside, by name or number, for agents you aren't looking at. It can also answer a dialog, fire one raw hook, or set the context gauge.
