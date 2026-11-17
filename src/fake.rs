@@ -9,7 +9,16 @@
 //! - it writes a conversation log with token usage, which trix's context
 //!   gauge reads;
 //! - it draws a prompt box, a spinner while it works, tool lines, and
-//!   permission and question dialogs that wait for a key.
+//!   permission and question dialogs that wait for a key, and go away once
+//!   answered, as Claude Code's do.
+//!
+//! As `codex` it follows Codex instead, where trix can tell: it reads the
+//! `-c notify=…` and `-c hooks=…` trix passes, runs `notify` after every
+//! finished turn (`agent-turn-complete`), and asks for approval in Codex's
+//! words. Codex runs hooks only once you trust them, so its lifecycle hooks
+//! (Codex-shaped: `exec_command`, `apply_patch`, `Interrupt`) fire only after
+//! `/hooks`; until then trix has `notify` and the screen, as with a real
+//! Codex whose hooks nobody trusted yet.
 //!
 //! What a turn does depends on words in the prompt (type `help` in the pane):
 //! `permission`, `question`, `long`, `flood`, `unicode`, `silent`, `crash`,
@@ -54,6 +63,14 @@ struct Agent {
     kind: String,
     name: String,
     hooks: HashMap<String, Vec<String>>,
+    /// Whether `hooks` run: always for Claude; for Codex once `/hooks`
+    /// trusted them.
+    trusted: AtomicBool,
+    /// Codex's `notify` command, run with each finished turn's JSON as its
+    /// last argument.
+    notify: Option<Vec<String>>,
+    /// The last reply of the turn, for `notify`'s `last-assistant-message`.
+    last_reply: Mutex<String>,
     session: String,
     transcript: Option<PathBuf>,
     cwd: PathBuf,
@@ -74,7 +91,11 @@ pub fn run(kind: String, args: Vec<String>) -> Result<()> {
     let mut settings = None;
     let mut resume = None;
     let mut prompt = None;
+    let mut overrides = Vec::new();
     let mut positional_only = false;
+    // `codex resume -c … <id>`, `muse resume <id>`: the id is the first
+    // word after `resume` that isn't an option or an option's value.
+    let mut resuming = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         if positional_only {
@@ -85,20 +106,23 @@ pub fn run(kind: String, args: Vec<String>) -> Result<()> {
             "--" => positional_only = true,
             "--settings" => settings = it.next(),
             "--resume" | "-r" | "--session" | "--session-id" => resume = it.next(),
-            "resume" => resume = it.next(), // codex / muse style
-            "-c" | "--plugin-dir" | "--model" | "--append-system-prompt" | "--permission-mode" => {
+            "resume" if matches!(kind.as_str(), "codex" | "muse") && resume.is_none() && prompt.is_none() => resuming = true,
+            "-c" | "--config" => overrides.extend(it.next()),
+            "--plugin-dir" | "--model" | "--append-system-prompt" | "--permission-mode" => {
                 it.next();
             }
             s if s.starts_with("--session-id=") => resume = Some(s["--session-id=".len()..].to_string()),
             s if s.starts_with("--interactive=") => prompt = Some(s["--interactive=".len()..].to_string()),
             s if s.starts_with('-') => {}
+            _ if resuming && resume.is_none() => resume = Some(a),
             _ => prompt = Some(a),
         }
     }
 
-    let hooks = match (&settings, kind.as_str()) {
-        (Some(p), "claude") => read_hooks(Path::new(p)),
-        _ => HashMap::new(),
+    let (hooks, notify) = match (&settings, kind.as_str()) {
+        (Some(p), "claude") => (read_hooks(Path::new(p)), None),
+        (_, "codex") => codex_config(&overrides),
+        _ => (HashMap::new(), None),
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let session = resume.clone().unwrap_or_else(new_uuid);
@@ -112,9 +136,12 @@ pub fn run(kind: String, args: Vec<String>) -> Result<()> {
     };
 
     let agent = Arc::new(Agent {
+        trusted: AtomicBool::new(kind != "codex"),
         kind: kind.clone(),
         name: std::env::var("TRIX_AGENT_NAME").unwrap_or_else(|_| kind.clone()),
         hooks,
+        notify,
+        last_reply: Mutex::new(String::new()),
         session,
         transcript,
         cwd,
@@ -177,9 +204,32 @@ extern "C" fn on_winch(_: i32) {
 }
 
 fn read_hooks(path: &Path) -> HashMap<String, Vec<String>> {
+    let Ok(text) = std::fs::read_to_string(path) else { return HashMap::new() };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else { return HashMap::new() };
+    hooks_in(&v)
+}
+
+/// What Codex makes of trix's `-c` overrides (TOML, one `key=value` each):
+/// the lifecycle hooks, shaped as Claude's settings are (`hooks.<Event>[]
+/// .hooks[].command`), and the `notify` command.
+fn codex_config(overrides: &[String]) -> (HashMap<String, Vec<String>>, Option<Vec<String>>) {
+    let mut hooks = HashMap::new();
+    let mut notify = None;
+    for o in overrides {
+        let Ok(table) = toml::from_str::<toml::Table>(o) else { continue };
+        let Ok(v) = serde_json::to_value(&table) else { continue };
+        if v.get("hooks").is_some() {
+            hooks = hooks_in(&v);
+        }
+        if let Some(argv) = v.get("notify").and_then(Value::as_array) {
+            notify = Some(argv.iter().filter_map(|a| a.as_str().map(String::from)).collect::<Vec<_>>()).filter(|a| !a.is_empty());
+        }
+    }
+    (hooks, notify)
+}
+
+fn hooks_in(v: &Value) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(path) else { return out };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else { return out };
     if let Some(hooks) = v.get("hooks").and_then(Value::as_object) {
         for (event, groups) in hooks {
             for g in groups.as_array().into_iter().flatten() {
@@ -272,7 +322,12 @@ impl Agent {
             let pad = inner - 1 - s.chars().count();
             format!("│ {s}{}│\r\n", " ".repeat(pad))
         };
-        let hooks = if self.hooks.is_empty() { "no hooks: trix reads the screen" } else { "hooks on" };
+        let hooks = match (self.hooks.is_empty(), self.trusted.load(Ordering::Relaxed), self.notify.is_some()) {
+            (false, true, _) => "hooks on",
+            (false, false, true) => "notify + screen · /hooks trusts trix's hooks",
+            (_, _, true) => "notify + screen",
+            _ => "no hooks: trix reads the screen",
+        };
         let mut s = format!("╭{}╮\r\n", "─".repeat(inner));
         s += &line(&format!("✻ fake {} (trix-probe) · {}", self.kind, hooks));
         s += &line(&format!("  cwd: {}", self.cwd.display()));
@@ -375,7 +430,11 @@ impl Agent {
     }
 
     fn hook(&self, event: &str, extra: Value) {
-        self.log(json!({"at": now_ms() as u64, "hook": event, "payload": extra}));
+        let trusted = self.trusted.load(Ordering::Relaxed);
+        self.log(json!({"at": now_ms() as u64, "hook": event, "payload": extra, "ran": trusted && self.hooks.contains_key(event)}));
+        if !trusted {
+            return;
+        }
         let Some(cmds) = self.hooks.get(event) else { return };
         let mut payload = json!({
             "session_id": self.session,
@@ -417,6 +476,64 @@ impl Agent {
         }
     }
 
+    /// Codex's `notify`: after each finished turn, the command with the
+    /// turn's JSON as its last argument. Codex doesn't wait for it.
+    fn notify_turn(&self, prompt: &str) {
+        let Some((prog, args)) = self.notify.as_deref().and_then(<[String]>::split_first) else { return };
+        let payload = json!({
+            "type": "agent-turn-complete",
+            "thread-id": self.session,
+            "turn-id": new_uuid(),
+            "cwd": self.cwd.display().to_string(),
+            "input-messages": [prompt],
+            "last-assistant-message": *self.last_reply.lock().unwrap(),
+        });
+        self.log(json!({"at": now_ms() as u64, "hook": "notify", "payload": payload, "ran": true}));
+        let child = std::process::Command::new(prog)
+            .args(args)
+            .arg(payload.to_string())
+            .current_dir(&self.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            std::thread::spawn(move || child.wait());
+        }
+    }
+
+    /// The tool as Codex's hooks name it: shell commands are `exec_command`
+    /// with an argv, edits are `apply_patch` with the patch.
+    fn hook_tool(&self, name: &str, input: &Value) -> (String, Value) {
+        if self.kind != "codex" {
+            return (name.into(), input.clone());
+        }
+        let g = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let shell = |cmd: String| ("exec_command".to_string(), json!({"cmd": ["bash", "-lc", cmd]}));
+        match name {
+            "Bash" => shell(g("command")),
+            "Read" => shell(format!("sed -n '1,200p' {}", g("file_path"))),
+            "Grep" => shell(format!("rg -n '{}'", g("pattern"))),
+            "Edit" | "Write" => {
+                let file = Path::new(&g("file_path")).strip_prefix(&self.cwd).map(|p| p.display().to_string()).unwrap_or_else(|_| g("file_path"));
+                ("apply_patch".into(), json!({"command": format!("*** Begin Patch\n*** Update File: {file}\n@@\n-{}\n+{}\n*** End Patch", g("old_string"), g("new_string"))}))
+            }
+            _ => (name.into(), input.clone()),
+        }
+    }
+
+    /// Codex's `/hooks`: trust trix's hooks, so they run from now on.
+    fn trust_hooks(&self) {
+        let n: usize = self.hooks.values().map(Vec::len).sum();
+        if n == 0 {
+            self.say("• No hooks to review.");
+        } else if self.trusted.swap(true, Ordering::Relaxed) {
+            self.say("• Hooks are trusted already.");
+        } else {
+            self.say(&format!("• Trusted {n} hook{}: they run from now on.", if n == 1 { "" } else { "s" }));
+        }
+    }
+
     /// Append a turn's token usage to the conversation log.
     fn record_usage(&self) {
         let Some(path) = &self.transcript else { return };
@@ -440,6 +557,13 @@ impl Agent {
     // ---- turns -------------------------------------------------------
 
     fn start_turn(self: Arc<Self>, prompt: String) {
+        // A slash command, not a turn: no hooks, no notify.
+        if self.kind == "codex" && prompt.trim() == "/hooks" {
+            if !self.st.lock().unwrap().busy {
+                self.trust_hooks();
+            }
+            return;
+        }
         {
             let mut st = self.st.lock().unwrap();
             if st.busy {
@@ -449,6 +573,7 @@ impl Agent {
             self.erase_prompt_locked(&mut st);
         }
         self.interrupt.store(false, Ordering::Relaxed);
+        self.last_reply.lock().unwrap().clear();
         std::thread::spawn(move || {
             let shown = prompt.replace('\n', "\r\n  ");
             self.emit(&format!("\r\x1b[2K\x1b[2m>\x1b[0m {shown}\r\n"));
@@ -457,11 +582,14 @@ impl Agent {
                 Ok(true) => {
                     self.record_usage();
                     self.hook("Stop", json!({"stop_hook_active": false}));
+                    self.notify_turn(&prompt);
                 }
                 Ok(false) => {}
                 Err(Interrupted) => {
                     self.emit("\r\x1b[2K");
                     self.say("  \x1b[31m⎿  Interrupted by user\x1b[0m · What should Claude do instead?");
+                    // Codex's; Claude has no such hook, and trix gives it none.
+                    self.hook("Interrupt", json!({}));
                 }
             }
             self.turns.fetch_add(1, Ordering::Relaxed);
@@ -487,7 +615,7 @@ impl Agent {
 
         if has("help") {
             self.work(400, "Thinking")?;
-            self.say(HELP);
+            self.reply(HELP);
             return Ok(true);
         }
         if has("crash") {
@@ -501,19 +629,19 @@ impl Agent {
         if let Some(n) = p.split_whitespace().skip_while(|w| *w != "context").nth(1).and_then(|n| n.trim_end_matches('%').parse::<u32>().ok()) {
             self.context.store((n * 10).min(1000), Ordering::Relaxed);
             self.work(600, "Thinking")?;
-            self.say(&format!("⏺ Context set to {n}%."));
+            self.reply(&format!("⏺ Context set to {n}%."));
             return Ok(true);
         }
         if let Some(rest) = prompt.strip_prefix("title ") {
             self.emit(&format!("\x1b]0;{rest}\x07"));
             self.work(300, "Thinking")?;
-            self.say(&format!("⏺ Title set to {rest:?}."));
+            self.reply(&format!("⏺ Title set to {rest:?}."));
             return Ok(true);
         }
         if has("bell") {
             self.work(300, "Thinking")?;
             self.emit("\x07");
-            self.say("⏺ Rang the bell.");
+            self.reply("⏺ Rang the bell.");
             return Ok(true);
         }
         if has("permission") || has("approve") || has("rm") {
@@ -527,14 +655,14 @@ impl Agent {
         }
         if has("unicode") || has("emoji") {
             self.work(500, "Thinking")?;
-            self.say(UNICODE);
+            self.reply(UNICODE);
             return Ok(true);
         }
         if has("long") || has("slow") {
             for i in 0..6 {
                 self.tool("Bash", json!({"command": format!("sleep 5 # step {}", i + 1)}), &["(no output)"], 5000)?;
             }
-            self.say("⏺ The long task is done.");
+            self.reply("⏺ The long task is done.");
             return Ok(true);
         }
         // A normal turn.
@@ -545,7 +673,7 @@ impl Agent {
         self.tool("Edit", json!({"file_path": self.cwd.join("src/main.rs").display().to_string(), "old_string": "a + b", "new_string": "a + b"}), &["Updated src/main.rs with 1 addition"], 800)?;
         self.tool("Bash", json!({"command": "cargo test"}), &["running 3 tests", "test tests::adds ... ok", "test tests::subs ... ok", "test result: ok. 3 passed"], 1500)?;
         let reply = format!("⏺ Done: {} (fake reply, turn {})", one_line(prompt, 60), self.turns.load(Ordering::Relaxed) + 1);
-        self.say(&reply);
+        self.reply(&reply);
         Ok(true)
     }
 
@@ -567,14 +695,21 @@ impl Agent {
 
     fn tool(&self, name: &str, input: Value, result: &[&str], ms: u64) -> Result<(), Interrupted> {
         let detail = tool_detail(name, &input);
-        self.hook("PreToolUse", json!({"tool_name": name, "tool_input": input}));
+        let (hname, hinput) = self.hook_tool(name, &input);
+        self.hook("PreToolUse", json!({"tool_name": hname, "tool_input": hinput}));
         self.say(&format!("\x1b[32m⏺\x1b[0m \x1b[1m{name}\x1b[0m({detail})"));
         self.work(ms, "Working")?;
         for (i, r) in result.iter().enumerate() {
             self.say(&format!("  {}  {r}", if i == 0 { "⎿" } else { " " }));
         }
-        self.hook("PostToolUse", json!({"tool_name": name, "tool_input": input, "tool_response": {"output": result.join("\n")}}));
+        self.hook("PostToolUse", json!({"tool_name": hname, "tool_input": hinput, "tool_response": {"output": result.join("\n")}}));
         Ok(())
+    }
+
+    /// A final reply, which Codex's `notify` passes on.
+    fn reply(&self, line: &str) {
+        *self.last_reply.lock().unwrap() = line.trim_start_matches("⏺ ").to_string();
+        self.say(line);
     }
 
     /// Wait for one key while a dialog is up.
@@ -586,7 +721,9 @@ impl Agent {
         answer
     }
 
-    fn dialog(&self, title: &str, body: &[String], options: &[&str]) {
+    /// A Claude-style dialog box. Returns how many lines it took, for
+    /// `close_dialog`.
+    fn dialog(&self, title: &str, body: &[String], options: &[&str]) -> usize {
         let w = self.box_width();
         let inner = w - 2;
         let row = |s: &str| {
@@ -602,33 +739,90 @@ impl Agent {
             lines.push(row(&format!("{} {}. {o}", if i == 0 { "❯" } else { " " }, i + 1)));
         }
         lines.push(format!("╰{}╯", "─".repeat(inner)));
+        self.show_dialog(&lines)
+    }
+
+    fn show_dialog(&self, lines: &[String]) -> usize {
         self.emit("\r\x1b[2K");
         self.say(&lines.join("\n"));
+        lines.len()
+    }
+
+    /// Take an answered dialog off the screen, as Claude Code and Codex do:
+    /// it's a prompt, not part of the conversation. (Left there, its wording
+    /// would read as a question still waiting to anyone reading the screen.)
+    fn close_dialog(&self, lines: usize) {
+        self.emit(&format!("\r\x1b[{lines}A\x1b[J"));
     }
 
     fn permission_turn(&self) -> Result<bool, Interrupted> {
+        if self.kind == "codex" {
+            return self.codex_approval_turn();
+        }
         self.work(800, "Thinking")?;
         let input = json!({"command": "rm -rf dist", "description": "Remove the build output"});
         self.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": input}));
         self.say("\x1b[32m⏺\x1b[0m \x1b[1mBash\x1b[0m(rm -rf dist)");
         self.hook("PermissionRequest", json!({"tool_name": "Bash", "tool_input": input}));
         self.hook("Notification", json!({"message": "Claude needs your permission to use Bash", "notification_type": "permission_prompt"}));
-        self.dialog("Bash command", &["rm -rf dist".into(), "Remove the build output".into(), String::new(), "Do you want to proceed?".into()], &["Yes", "Yes, and don't ask again for rm commands", "No, and tell Claude what to do differently (esc)"]);
+        let shown = self.dialog("Bash command", &["rm -rf dist".into(), "Remove the build output".into(), String::new(), "Do you want to proceed?".into()], &["Yes", "Yes, and don't ask again for rm commands", "No, and tell Claude what to do differently (esc)"]);
         loop {
             match self.ask()? {
                 Answer::Key('1') | Answer::Key('y') | Answer::Enter | Answer::Key('2') => {
+                    self.close_dialog(shown);
                     self.work(600, "Working")?;
                     self.say("  ⎿  (no output)");
                     self.hook("PostToolUse", json!({"tool_name": "Bash", "tool_input": input, "tool_response": {"output": ""}}));
-                    self.say("⏺ Removed dist/.");
+                    self.reply("⏺ Removed dist/.");
                     return Ok(true);
                 }
                 Answer::Key('3') | Answer::Key('n') | Answer::Esc => {
+                    self.close_dialog(shown);
                     self.say("  \x1b[31m⎿  User rejected the command\x1b[0m");
                     return Ok(false);
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Codex's approval of a shell command, in its words: trix tells it's
+    /// waiting from those alone until its hooks are trusted.
+    fn codex_approval_turn(&self) -> Result<bool, Interrupted> {
+        self.work(800, "Thinking")?;
+        let cmd = "rm -rf dist";
+        let (tool, input) = self.hook_tool("Bash", &json!({"command": cmd}));
+        self.hook("PreToolUse", json!({"tool_name": tool, "tool_input": input}));
+        self.hook("PermissionRequest", json!({"tool_name": tool, "tool_input": input}));
+        let shown = self.show_dialog(&[
+            "Would you like to run the following command?".into(),
+            String::new(),
+            format!("  $ {cmd}"),
+            String::new(),
+            "› 1. Yes, proceed (y)".into(),
+            "  2. Yes, and don't ask again for commands that start with `rm -rf` (p)".into(),
+            "  3. No, and tell Codex what to do differently (esc)".into(),
+            String::new(),
+            "  Press enter to confirm or esc to cancel".into(),
+        ]);
+        loop {
+            let always = match self.ask()? {
+                Answer::Key('1' | 'y') | Answer::Enter => false,
+                Answer::Key('2' | 'p' | 'a') => true,
+                Answer::Key('3' | 'n') | Answer::Esc => {
+                    self.close_dialog(shown);
+                    self.say(&format!("\x1b[31m✗\x1b[0m You did not approve codex to run {cmd}"));
+                    return Ok(false);
+                }
+                _ => continue,
+            };
+            self.close_dialog(shown);
+            self.say(&format!("\x1b[32m✔\x1b[0m You approved codex to run {cmd} {}", if always { "every time this session" } else { "this time" }));
+            self.work(600, "Working")?;
+            self.say(&format!("\x1b[1m•\x1b[0m Ran {cmd}\n  └ (no output)"));
+            self.hook("PostToolUse", json!({"tool_name": tool, "tool_input": input, "tool_response": {"output": ""}}));
+            self.reply("⏺ Removed dist/.");
+            return Ok(true);
         }
     }
 
@@ -638,23 +832,25 @@ impl Agent {
         let input = json!({"questions": [{"question": q, "header": "Database", "multiSelect": false,
             "options": [{"label": "Postgres", "description": "A server"}, {"label": "SQLite", "description": "A file"}]}]});
         self.hook("PreToolUse", json!({"tool_name": "AskUserQuestion", "tool_input": input}));
-        self.dialog(q, &[], &["Postgres", "SQLite", "Type something else"]);
+        let shown = self.dialog(q, &[], &["Postgres", "SQLite", "Type something else"]);
         let pick = loop {
             match self.ask()? {
                 Answer::Key(c @ '1'..='3') => break c,
                 Answer::Enter => break '1',
                 Answer::Esc => {
+                    self.close_dialog(shown);
                     self.say("  \x1b[31m⎿  User declined to answer\x1b[0m");
                     return Ok(false);
                 }
                 _ => {}
             }
         };
+        self.close_dialog(shown);
         let label = ["Postgres", "SQLite", "something else"][(pick as u8 - b'1') as usize];
         self.hook("PostToolUse", json!({"tool_name": "AskUserQuestion", "tool_input": input, "tool_response": {"answers": {q: label}}}));
         self.say(&format!("  ⎿  {label}"));
         self.work(800, "Working")?;
-        self.say(&format!("⏺ Going with {label}."));
+        self.reply(&format!("⏺ Going with {label}."));
         Ok(true)
     }
 
@@ -674,7 +870,7 @@ impl Agent {
             }
         }
         self.hook("PostToolUse", json!({"tool_name": "Bash", "tool_input": input, "tool_response": {"output": "3000 lines"}}));
-        self.say("⏺ Printed 3000 lines.");
+        self.reply("⏺ Printed 3000 lines.");
         Ok(true)
     }
 
@@ -860,7 +1056,8 @@ impl Agent {
         match what {
             "status" => json!({"ok": true, "kind": self.kind, "name": self.name, "busy": busy, "dialog_open": pending,
                 "session": self.session, "context_percent": self.context.load(Ordering::Relaxed) as f32 / 10.0,
-                "turns": self.turns.load(Ordering::Relaxed), "hooks": !self.hooks.is_empty()}),
+                "turns": self.turns.load(Ordering::Relaxed), "hooks": !self.hooks.is_empty(),
+                "hooks_trusted": self.trusted.load(Ordering::Relaxed), "notify": self.notify.is_some()}),
             "turn" => start(if text.is_empty() { "make a small change".into() } else { text }),
             "permission" => start("(probe) ask permission to rm -rf dist".into()),
             "question" => start("(probe) ask a question".into()),
@@ -962,6 +1159,7 @@ const HELP: &str = "⏺ I'm a fake agent for testing trix. Words in a prompt pic
     bell         ring the bell
     crash        exit with code 1 at once
     exit         exit normally
+    /hooks       (codex) trust trix's hooks, so they run from now on
   Anything else: a short turn with Read, Grep, Edit and Bash. Esc interrupts.";
 
 const UNICODE: &str = "⏺ Unicode check:

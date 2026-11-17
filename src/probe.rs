@@ -1004,7 +1004,9 @@ impl Probe {
                     let id = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     for l in tail(&p, &|l| Some(l.to_string())) {
                         let short = serde_json::from_str::<Value>(&l).ok().map(|v| {
-                            format!("agent id {id}: hook {} {}", v["hook"].as_str().unwrap_or("?"), clip(&v["payload"].to_string(), 120))
+                            // `ran: false`: a Codex hook nobody trusted yet, or an event trix gave no hook.
+                            let ran = if v["ran"] == false { " (not run)" } else { "" };
+                            format!("agent id {id}: hook {}{ran} {}", v["hook"].as_str().unwrap_or("?"), clip(&v["payload"].to_string(), 120))
                         });
                         v.push(short.unwrap_or(l));
                     }
