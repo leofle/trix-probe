@@ -165,6 +165,12 @@ impl Sandbox {
             std::fs::write(home.join(".zshrc"), "PROMPT='%~ %# '\n")?;
             std::fs::write(home.join(".bashrc"), "PS1='\\w \\$ '\n")?;
             put("GIT_CONFIG_NOSYSTEM", "1".into());
+            // Who commits: trix's review commits and merges as you would, and
+            // git refuses to without a name and email.
+            std::fs::write(
+                home.join(".gitconfig"),
+                "[user]\n\tname = trix-probe\n\temail = probe@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n",
+            )?;
         }
         for (k, v) in &opts.extra_env {
             put(k, v.clone());
@@ -192,6 +198,11 @@ impl Sandbox {
         self.work.join("demo")
     }
 
+    /// The demo repo's `origin`: a bare repository beside it.
+    pub fn origin_repo(&self) -> PathBuf {
+        self.work.join("origin.git")
+    }
+
     fn make_demo_repo(&self) -> Result<()> {
         let repo = self.demo_repo();
         std::fs::create_dir_all(repo.join("src"))?;
@@ -214,6 +225,10 @@ impl Sandbox {
                 .is_ok_and(|s| s.success())
         };
         if git(&["init", "-q"]) && git(&["add", "-A"]) && git(&["commit", "-q", "-m", "demo: first commit"]) {
+            // A remote with main on it, as a clone has: trix's review pushes,
+            // opens PRs and merges against one.
+            let origin = self.origin_repo().display().to_string();
+            let _ = git(&["init", "-q", "--bare", &origin]) && git(&["remote", "add", "origin", &origin]) && git(&["push", "-q", "-u", "origin", "main"]);
             std::fs::write(repo.join("src/main.rs"), "fn main() {\n    println!(\"hello from the demo, changed\");\n}\n\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n")?;
         }
         Ok(())

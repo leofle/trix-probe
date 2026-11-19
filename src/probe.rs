@@ -279,7 +279,7 @@ impl Probe {
             None => sb.demo_repo(),
         };
         let summary = format!(
-            "sandbox {} · trix {} ({}) · {} agents · {}x{} · {} terminal colors · {} keyboard\nagents start in {} (a git repo with an uncommitted change); {} is also there.\n",
+            "sandbox {} · trix {} ({}) · {} agents · {}x{} · {} terminal colors · {} keyboard\nagents start in {} (a git repo with an uncommitted change, and main pushed to its origin {}); {} is also there.\n",
             sb.root.display(),
             self.trix.display(),
             self.trix_version(),
@@ -289,6 +289,7 @@ impl Probe {
             self.palette.name,
             if self.keyboard == Keyboard::Kitty { "kitty" } else { "legacy" },
             cwd.display(),
+            sb.origin_repo().display(),
             sb.work.join("other").display(),
         );
         self.sb = Some(sb);

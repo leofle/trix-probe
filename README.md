@@ -135,9 +135,9 @@ trix-probe try --keys alt+n -o form.png -- claude shell     # launch, press alt+
 
 ## The fake agents
 
-In the sandbox, `claude`, `codex`, `grok`, `opencode`, `cursor-agent`, `copilot` and `muse` are all `trix-probe fake-agent`. The fake claude reads the `--settings` overlay trix hands it and runs trix's own hook commands with Claude-shaped payloads (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`). It also writes a conversation log with token usage for the context gauge. The fake codex reads the `-c notify=…` and `-c hooks=…` trix hands Codex, and does what Codex does with them: it runs `notify` after every finished turn (`agent-turn-complete`, with the last reply), asks for approval in Codex's words, and runs the lifecycle hooks (Codex-shaped: `exec_command`, `apply_patch`, `Interrupt`) only once `/hooks` has trusted them, since Codex runs no hook you haven't trusted. The other kinds fire no hooks, so trix has to read their screens, as it does for agents without hooks. Every fake takes an answered dialog off the screen, as Claude Code and Codex do.
+In the sandbox, `claude`, `codex`, `grok`, `opencode`, `cursor-agent`, `copilot` and `muse` are all `trix-probe fake-agent`. The fake claude reads the `--settings` overlay trix hands it and runs trix's own hook commands with Claude-shaped payloads (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`). It also writes a conversation log with token usage for the context gauge. Every fake turns on bracketed paste, as Claude Code and Codex do, so a multi-line prompt (review notes, `trix send`, a paste) arrives as one prompt. The fake codex reads the `-c notify=…` and `-c hooks=…` trix hands Codex, and does what Codex does with them: it runs `notify` after every finished turn (`agent-turn-complete`, with the last reply), asks for approval in Codex's words, and runs the lifecycle hooks (Codex-shaped: `exec_command`, `apply_patch`, `Interrupt`) only once `/hooks` has trusted them, since Codex runs no hook you haven't trusted. The other kinds fire no hooks, so trix has to read their screens, as it does for agents without hooks. Every fake takes an answered dialog off the screen, as Claude Code and Codex do.
 
-Type a prompt into a fake agent's pane. Words in it decide the turn:
+Type a prompt into a fake agent's pane. Words in it decide the turn (in a prompt of several lines, such as a paste or trix's review notes, only words in the first line):
 
 | word | the agent… |
 | --- | --- |
@@ -160,7 +160,8 @@ Esc interrupts a turn. Ctrl-C twice exits. The `fake_agent` tool does all of thi
 Each `launch` creates `/tmp/tp-<id>`. The path is short because macOS caps unix socket paths at 104 bytes. Each sandbox has:
 
 - its own `HOME` and `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_RUNTIME_DIR`, so its trix server, sockets, config, saved workspace and layouts never meet yours;
-- a demo git repo (`work/demo`) with one commit and an uncommitted change, so branch and diff have something to show, plus a second folder (`work/other`);
+- a demo git repo (`work/demo`) with one commit and an uncommitted change, so branch and diff have something to show, and a bare `origin` (`work/origin.git`) with `main` pushed to it, so trix's review can push, open a PR and merge, plus a second folder (`work/other`);
+- a git identity (`trix-probe <probe@example.invalid>`) in its `HOME`, so commits and merges trix makes from the review go through;
 - shims on `PATH` for the fake agents, and loggers in place of `afplay`, `pw-play`, `notify-send`, `osascript`, `pbcopy` and `wl-copy`. Notifications go through config.toml's `notify.command` to a logger, and `TRIX_NO_NOTIFY=1` keeps them off your desktop.
 
 The probe clears `TRIX_*`, `TMUX`, terminal-identity and Claude Code variables from its own environment first, so it works from inside a trix pane. The sandbox is removed on `teardown`, on the next `launch`, when the MCP client disconnects, and on SIGTERM, SIGINT or SIGHUP. If a probe is killed hard, the next one to start cleans up its sandbox. `--keep` leaves sandboxes in place to inspect.
