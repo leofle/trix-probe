@@ -1,0 +1,31 @@
+{
+  "title": "The review takes a worktree agent's work from commit to push, merge and clean up",
+  "notes": "trix 1.4.0's alt+v review, end to end on the sandbox's demo repo and its bare origin (work/origin.git). A fake claude in a worktree makes a real edit; the review commits it, pushes the branch, merges it into main and removes the worktree and the merged branch. Before the sandbox had a git identity and an origin, the commit failed ('unable to auto-detect email address') and there was nowhere to push.",
+  "fixed_in": "1.4.0",
+  "actions": [
+    {"tool": "launch", "args": {"args": ["claude"], "cols": 120, "rows": 32}},
+    {"tool": "wait_for", "args": {"text": "1 idle", "timeout_ms": 15000}},
+    {"tool": "press", "args": {"keys": ["alt+v", "C"]}},
+    {"tool": "type_text", "args": {"text": "demo: the change main started with", "enter": true}},
+    {"tool": "wait_for", "args": {"regex": "committed [0-9a-f]+ demo: the change", "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"text": "main   nothing uncommitted", "why": "main is clean, so a branch can merge into it"}},
+    {"tool": "press", "args": {"keys": ["esc"]}},
+    {"tool": "run_trix", "args": {"args": ["spawn", "claude", "--name", "feature", "--worktree", "--prompt", "tweak the greeting"]}},
+    {"tool": "wait_for", "args": {"text": "finished", "timeout_ms": 20000}},
+    {"tool": "press", "args": {"keys": ["alt+2", "alt+v"]}},
+    {"tool": "expect", "args": {"text": "trix/feature → main · 0 commits ahead", "why": "the review knows the worktree's branch and the branch it merges into"}},
+    {"tool": "press", "args": {"keys": ["C"]}},
+    {"tool": "type_text", "args": {"text": "feature: tweak the greeting", "enter": true}},
+    {"tool": "wait_for", "args": {"regex": "committed [0-9a-f]+ feature: tweak the greeting", "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"text": "1 commit ahead", "why": "the commit is on the branch"}},
+    {"tool": "press", "args": {"keys": ["P", "y"]}},
+    {"tool": "wait_for", "args": {"text": "pushed trix/feature to origin", "timeout_ms": 10000}},
+    {"tool": "press", "args": {"keys": ["M"]}},
+    {"tool": "expect", "args": {"text": "g  merge the PR", "why": "a pushed branch is offered the PR merge too"}},
+    {"tool": "press", "args": {"keys": ["l"]}},
+    {"tool": "wait_for", "args": {"text": "merged trix/feature into main", "timeout_ms": 10000}},
+    {"tool": "press", "args": {"keys": ["X", "y"]}},
+    {"tool": "wait_for", "args": {"text": "removed the worktree and trix/feature", "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"regex": "[○✓●] feature", "absent": true, "why": "clean up closed the agent: its card is gone"}}
+  ]
+}

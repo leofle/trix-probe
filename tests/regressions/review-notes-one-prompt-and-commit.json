@@ -1,0 +1,23 @@
+{
+  "title": "Review notes reach a fake agent as one prompt, and the review's commit goes through",
+  "notes": "trix 1.4.0's alt+v review sends every note as one multi-line prompt and commits with git. Gaps in trix-probe hid both: the fake agents never turned on bracketed paste, so trix typed the prompt a line per Enter and the agent took only its first line as the turn; the fake took trigger words from every line, so a note or quoted code with exit or rm in it ended the agent or asked for permission; and the sandbox HOME had no git identity, so the review's commit failed with 'unable to auto-detect email address'. Needs trix 1.4.0 for the review.",
+  "fixed_in": "1.4.0",
+  "actions": [
+    {"tool": "launch", "args": {"args": ["claude"], "cols": 120, "rows": 32}},
+    {"tool": "wait_for", "args": {"text": "1 idle", "timeout_ms": 15000}},
+    {"tool": "press", "args": {"keys": ["alt+v"]}},
+    {"tool": "expect", "args": {"text": "Review · claude", "why": "alt+v opens the focused agent's review"}},
+    {"tool": "press", "args": {"keys": ["g", "enter"]}},
+    {"tool": "type_text", "args": {"text": "split this file up before you exit", "enter": true}},
+    {"tool": "expect", "args": {"text": "1 note", "why": "the note is kept on the file"}},
+    {"tool": "press", "args": {"keys": ["s"]}},
+    {"tool": "wait_for", "args": {"text": "finished", "timeout_ms": 20000}},
+    {"tool": "expect", "args": {"regex": "│ {3,}→ split this file up before you exit", "why": "the note is part of the turn's prompt"}},
+    {"tool": "expect", "args": {"text": "Done: Review notes", "why": "a normal turn: only the prompt's first line picks what the fake does, so the note's exit doesn't end it"}},
+    {"tool": "expect", "args": {"regex": "│ │ > \\S", "absent": true, "why": "nothing of the prompt was left typed ahead in the input box"}},
+    {"tool": "press", "args": {"keys": ["alt+v", "C"]}},
+    {"tool": "type_text", "args": {"text": "from the review", "enter": true}},
+    {"tool": "wait_for", "args": {"regex": "committed [0-9a-f]+ from the review", "timeout_ms": 10000}},
+    {"tool": "expect", "args": {"text": "nothing uncommitted", "why": "the commit took every change"}}
+  ]
+}

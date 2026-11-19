@@ -23,7 +23,9 @@
 //! What a turn does depends on words in the prompt (type `help` in the pane):
 //! `permission`, `question`, `long`, `flood`, `unicode`, `silent`, `crash`,
 //! `exit`, `context 85`, `title …`, `bell`. Anything else is a short normal
-//! turn: Read, Grep, Edit (a real edit, inside the sandbox only), Bash.
+//! turn: Read, Grep, Edit (a real edit, inside the sandbox only), Bash. In a
+//! prompt of several lines (a paste, trix's review notes) only the first
+//! line counts.
 //!
 //! The probe can also drive it from outside through a unix socket,
 //! `$TRIX_PROBE_ROOT/f/<TRIX_AGENT_ID>.sock`: one JSON object per line, e.g.
@@ -187,6 +189,10 @@ pub fn run(kind: String, args: Vec<String>) -> Result<()> {
         });
     }
 
+    // Bracketed paste on, as Claude Code and Codex turn it on: trix then
+    // sends a multi-line prompt (review notes, `trix send`, a paste) as one
+    // paste instead of a line per Enter.
+    agent.emit("\x1b[?2004h");
     agent.banner(resume.is_some());
     agent.hook("SessionStart", json!({"source": if resume.is_some() { "resume" } else { "startup" }}));
     match prompt.filter(|p| !p.trim().is_empty()) {
@@ -604,7 +610,11 @@ impl Agent {
     /// One turn. Ok(true): finished normally (Stop fires); Ok(false): ended
     /// without Stop (a rejected permission, like Claude).
     fn turn(&self, prompt: &str) -> Result<bool, Interrupted> {
-        let p = prompt.to_lowercase();
+        // Only the first line picks the turn: the rest of a pasted prompt
+        // (trix's review notes quote code) would set off words by accident,
+        // `exit(1)` or an `rm` in a line under review.
+        let first = prompt.lines().next().unwrap_or("");
+        let p = first.to_lowercase();
         let has = |w: &str| p.split(|c: char| !c.is_alphanumeric() && c != '/').any(|t| t == w);
         let silent = has("silent");
         if !silent {
@@ -632,7 +642,7 @@ impl Agent {
             self.reply(&format!("⏺ Context set to {n}%."));
             return Ok(true);
         }
-        if let Some(rest) = prompt.strip_prefix("title ") {
+        if let Some(rest) = first.strip_prefix("title ") {
             self.emit(&format!("\x1b]0;{rest}\x07"));
             self.work(300, "Thinking")?;
             self.reply(&format!("⏺ Title set to {rest:?}."));
@@ -879,23 +889,33 @@ impl Agent {
     fn read_stdin(self: &Arc<Self>) {
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 4096];
+        // What the last read ended in the middle of (an escape sequence, a
+        // UTF-8 character): a long paste arrives in several reads.
+        let mut carry = Vec::new();
         loop {
             let n = match stdin.read(&mut buf) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => n,
             };
-            for key in self.decode(&buf[..n]) {
+            carry.extend_from_slice(&buf[..n]);
+            let (keys, used) = self.decode(&carry);
+            carry.drain(..used);
+            for key in keys {
                 self.on_key(key);
             }
         }
     }
 
-    fn decode(&self, b: &[u8]) -> Vec<Key> {
+    /// The keys in `b`, and how many bytes they took: a sequence cut off at
+    /// the end is left for the next read.
+    fn decode(&self, b: &[u8]) -> (Vec<Key>, usize) {
         let mut keys = Vec::new();
         let mut i = 0;
         let pasting = |a: &Agent| a.st.lock().unwrap().pasting;
         while i < b.len() {
             match b[i] {
+                // Mid-paste, a last ESC starts the end marker, not a key.
+                0x1b if i + 1 == b.len() && pasting(self) => return (keys, i),
                 0x1b if i + 1 == b.len() => {
                     keys.push(Key::Esc);
                     i += 1;
@@ -905,7 +925,10 @@ impl Agent {
                     while j < b.len() && !(0x40..=0x7e).contains(&b[j]) {
                         j += 1;
                     }
-                    let seq = String::from_utf8_lossy(&b[i + 2..=j.min(b.len() - 1)]).into_owned();
+                    if j == b.len() {
+                        return (keys, i);
+                    }
+                    let seq = String::from_utf8_lossy(&b[i + 2..=j]).into_owned();
                     match seq.as_str() {
                         "200~" => self.st.lock().unwrap().pasting = true,
                         "201~" => self.st.lock().unwrap().pasting = false,
@@ -920,6 +943,7 @@ impl Agent {
                     keys.push(Key::Newline);
                     i += 2;
                 }
+                0x1b if b[i + 1] == b'O' && i + 2 == b.len() => return (keys, i),
                 0x1b if b[i + 1] == b'O' => i += 3,
                 0x1b => i += 2, // alt+key: nothing in this fake
                 b'\r' | b'\n' => {
@@ -950,15 +974,17 @@ impl Agent {
                         0xf0..=0xf7 => 4,
                         _ => 1,
                     };
-                    let end = (i + len).min(b.len());
-                    for ch in String::from_utf8_lossy(&b[i..end]).chars() {
+                    if i + len > b.len() {
+                        return (keys, i);
+                    }
+                    for ch in String::from_utf8_lossy(&b[i..i + len]).chars() {
                         keys.push(Key::Char(ch));
                     }
-                    i = end;
+                    i += len;
                 }
             }
         }
-        keys
+        (keys, i)
     }
 
     fn on_key(self: &Arc<Self>, key: Key) {
@@ -1124,7 +1150,7 @@ impl Agent {
                 libc::tcsetattr(0, libc::TCSANOW, t);
             }
         }
-        self.emit("\r\n");
+        self.emit("\x1b[?2004l\r\n");
         for p in [&self.sock, &self.registry].into_iter().flatten() {
             let _ = std::fs::remove_file(p);
         }
@@ -1160,7 +1186,8 @@ const HELP: &str = "⏺ I'm a fake agent for testing trix. Words in a prompt pic
     crash        exit with code 1 at once
     exit         exit normally
     /hooks       (codex) trust trix's hooks, so they run from now on
-  Anything else: a short turn with Read, Grep, Edit and Bash. Esc interrupts.";
+  Anything else: a short turn with Read, Grep, Edit and Bash. Esc interrupts.
+  In a prompt of several lines, only the first line picks.";
 
 const UNICODE: &str = "⏺ Unicode check:
   wide:      你好世界 · 日本語のテキスト · 한국어
