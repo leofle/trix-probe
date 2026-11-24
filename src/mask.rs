@@ -25,7 +25,8 @@ pub fn default_masks() -> Vec<(Regex, Mask)> {
     let re = |s: &str| Regex::new(s).unwrap();
     vec![
         (re(r"\b\d{1,2}:\d{2}(:\d{2})?\b"), Mask::Digits),
-        (re(r"\b\d+(\.\d+)?(ms|s|m|h|d)\b"), Mask::Digits),
+        // "9s", "1.5s", and chained ones like "1m27s" or "2h05m".
+        (re(r"\b(\d+(\.\d+)?(ms|s|m|h|d))+\b"), Mask::Digits),
         (re(r"(session|pid) \[?[0-9a-f]+\]?"), Mask::All),
         (re(r"[\x{2800}-\x{28FF}]"), Mask::Char('⠿')),
         (re(r"[\x{2581}-\x{2588}]"), Mask::Char('▁')),
@@ -88,5 +89,13 @@ mod tests {
     #[test]
     fn separators_are_not_spinners() {
         assert_eq!(mask("focus  ·  16:57", &DEFAULT), "focus  ·  ##:##");
+    }
+
+    #[test]
+    fn chained_durations_are_masked() {
+        assert_eq!(masked("idle 1m27s ╯"), "idle #m##s ╯");
+        assert_eq!(masked("claude  2h05m"), "claude  #h##m");
+        assert_eq!(masked("idle 1m27s"), masked("idle 1m28s"));
+        assert_eq!(masked("idle 9s"), "idle #s");
     }
 }
